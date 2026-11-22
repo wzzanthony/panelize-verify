@@ -1,10 +1,10 @@
 {
-  "name": "panelize",
+  "name": "panelize-verify",
   "version": "2.2.4",
-  "description": "Compare AI chatbots side-by-side",
+  "description": "Compare AI chatbots side-by-side, vote first, then see a Google-Search-grounded Gemini fact check",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Manho/Panelize"
+    "url": "https://github.com/wzzanthony/panelize-verify"
   },
   "private": true,
   "type": "module",
@@ -21,12 +21,16 @@
     "test:e2e": "playwright test tests/e2e",
     "test:e2e:headed": "PANELIZE_E2E_HEADED=1 playwright test tests/e2e",
     "test:live": "playwright test --config playwright.live.config.js",
-    "test:live:login": "node tests/live/login.js"
+    "test:live:login": "node tests/live/login.js",
+    "typecheck": "tsc -p tsconfig.verify.json",
+    "test:verify": "vitest run tests/verify-*.test.js",
+    "test:e2e:verify": "playwright test tests/e2e/verify-flow.e2e.test.js"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "@vitest/ui": "^3.2.4",
     "happy-dom": "^20.14.5",
+    "typescript": "^5.6.3",
     "vitest": "^3.2.4",
     "web-ext": "^9.0.0"
   }

@@ -1,6 +1,6 @@
 {
   "extensionName": {
-    "message": "Panelize - 複数の AI チャットを並べて比較"
+    "message": "Panelize Verify - 複数の AI チャットを並べて比較"
   },
   "extensionDescription": {
     "message": "複数の AI チャットに一度に質問し回答を並べて比較。既存ログインで無料・API キー不要。任意の AI サイトや API も追加可能。"

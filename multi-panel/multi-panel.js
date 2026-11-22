@@ -131,6 +131,8 @@ import {
   switchTabOpenMode
 } from '../modules/open-mode-switcher.js';
 import { createPointerGuard, createPointerTracker } from '../modules/pointer-guard.js';
+import { createVerifyDock } from './verify-dock.js';
+import { createIndexedDbStore } from '../modules/verify/storage.js';
 
 
 // ===== State Management =====
@@ -175,6 +177,7 @@ let tempChatButtonRestoreTimerId = null;
 let isTemporaryChatModeEnabled = false;
 let customApiHostBridge = null;
 let customSwRecoveryController = null;
+let verifyDock = null; // Panelize Verify: answer capture, human vote, Gemini check
 
 function getResolvedHostTheme() {
   return isDarkThemeActive() ? 'dark' : 'light';
@@ -321,6 +324,7 @@ async function init() {
   setupEventListeners();
   setupRatingPrompt();
   setupShareSnapshot();
+  await setupVerifyDock();
   updateTemporaryChatButtonState();
   focusUnifiedInput({ force: true });
 
@@ -2153,6 +2157,13 @@ export async function broadcastMessage(text, autoSubmit = true) {
       return;
     }
 
+    // Panelize Verify reads each panel's current turn before the prompt
+    // lands, so the reply to this prompt is told apart from older ones.
+    const verifyTracksSend = shouldAutoSubmit && text.trim().length > 0;
+    if (verifyTracksSend) {
+      verifyDock?.beforeBroadcast(text);
+    }
+
     // Filling focuses each provider's composer too. Keep the unified input
     // focused, or the next Enter lands in one panel and sends only there.
     const fillActionRequestId = isFillAction ? createFillActionRequestId() : null;
@@ -2382,6 +2393,10 @@ export async function broadcastMessage(text, autoSubmit = true) {
       recordSendForRatingPrompt();
     }
 
+    if (verifyTracksSend) {
+      void verifyDock?.afterBroadcast(text, { sent: totalSuccessful > 0 });
+    }
+
     if (totalSuccessful > 0) {
       rememberSnapshotPrompt(text);
     }
@@ -2409,6 +2424,27 @@ export async function broadcastMessage(text, autoSubmit = true) {
     sendBtn.disabled = false;
     fillBtn.disabled = false;
     broadcastGate.release();
+  }
+}
+
+async function setupVerifyDock() {
+  const root = document.getElementById('verify-dock');
+  if (!root) return;
+  verifyDock?.destroy();
+  verifyDock = createVerifyDock({
+    root,
+    toggleButton: document.getElementById('verify-dock-btn'),
+    getPanels: () => panels,
+    postToPanelFrame,
+    findMessageSourcePanel,
+    getProviderName: providerId => getProviderById(providerId)?.name || providerId,
+    store: createIndexedDbStore(),
+    showToast
+  });
+  try {
+    await verifyDock.init();
+  } catch (error) {
+    console.error('[Panelize Verify] Dock failed to start:', error);
   }
 }
 

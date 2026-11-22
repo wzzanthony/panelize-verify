@@ -1,6 +1,6 @@
 {
   "extensionName": {
-    "message": "Panelize - 多个 AI 并排对比"
+    "message": "Panelize Verify - 多个 AI 并排对比"
   },
   "extensionDescription": {
     "message": "一次提问，并排对比多个AI聊天助手。内置平台直连自有账号、免费免API Key，并支持添加自定义AI网站与API接口。"

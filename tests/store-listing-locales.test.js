@@ -24,7 +24,7 @@ describe('store listing locales', () => {
   it('localizes the manifest name and description', () => {
     expect(manifest.name).toBe('__MSG_extensionName__');
     expect(manifest.description).toBe('__MSG_extensionDescription__');
-    expect(manifest.short_name).toBe('Panelize');
+    expect(manifest.short_name).toBe('Panelize Verify');
   });
 
   it.each(locales)('%s keeps the store name and summary within limits', (locale) => {
