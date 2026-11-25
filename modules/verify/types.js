@@ -70,6 +70,7 @@
  * @property {AnonymousVerdict} [anonymousVerdict] Verdict as Gemini gave it (X/Y).
  * @property {string} reasoning
  * @property {VerifiedClaim[]} claims
+ * @property {{ A?: LogicReview, B?: LogicReview }} [logic] Web mode: logic review per answer.
  * @property {string} evaluatedAt
  * @property {object} [criteria]
  * @property {string[]} [warnings]
@@ -78,6 +79,20 @@
  * @property {object} [usage]
  * @property {number} [redactions] Model self-references redacted before sending.
  * @property {unknown} [groundingMetadata]
+ */
+
+/**
+ * @typedef {object} LogicIssue
+ * @property {'MISREAD_QUESTION' | 'INVALID_INFERENCE' | 'CALCULATION_ERROR' | 'CONTRADICTION' | 'UNSUPPORTED_ASSUMPTION' | 'OTHER'} type
+ * @property {'high' | 'medium' | 'low'} severity
+ * @property {string} quote Excerpt from the answer.
+ * @property {string} explanation
+ */
+
+/**
+ * @typedef {object} LogicReview
+ * @property {'SOUND' | 'MINOR_ISSUES' | 'FLAWED'} verdict
+ * @property {LogicIssue[]} issues
  */
 
 /**

@@ -148,7 +148,7 @@ test('Verify: capture both answers, vote first, then reveal the blind Gemini che
   }
 });
 
-test('Verify web mode: Gemini runs hidden on gemini.google.com, no API call, results after the vote', async ({}, testInfo) => {
+test('Verify web mode: two answer panels on top, Gemini verifies below, no API call, results after the vote', async ({}, testInfo) => {
   test.setTimeout(120000);
   const extension = await launchExtension({ viewport: { width: 1400, height: 1000 } });
   const apiRequests = [];
@@ -175,10 +175,12 @@ test('Verify web mode: Gemini runs hidden on gemini.google.com, no API call, res
       return route.abort();
     });
 
-    const page = await openMultiPanel(extension, { providers: ['chatgpt', 'claude'], layout: '1x2' });
+    // Panelize's default three panels: Gemini at the top must not answer.
+    const page = await openMultiPanel(extension, { providers: ['chatgpt', 'claude', 'gemini'], layout: '1x3' });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     const dock = page.locator('#verify-dock');
+    const pane = page.locator('#verify-judge-pane');
 
     // Web mode is the default: only the consent is needed, no key.
     await dock.getByRole('button', { name: 'Verify settings' }).click();
@@ -193,18 +195,21 @@ test('Verify web mode: Gemini runs hidden on gemini.google.com, no API call, res
     await page.locator('#unified-input').fill(PROMPT);
     await page.locator('#send-all-btn').click();
 
-    // While Gemini works, its frame sits under an opaque cover.
-    await expect(page.locator('.pv-judge-host')).toBeVisible({ timeout: 30000 });
-    await expect(page.locator('.pv-judge-cover')).toContainText('hidden until you vote');
+    // While Gemini works, the verifier panel below is covered.
+    await expect(pane.locator('.pv-judge-cover')).toContainText('covered until you vote', { timeout: 30000 });
+    await expect(pane).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('web-1-running.png') });
 
     await expect(dock.getByText('Results are hidden until you submit or skip your vote')).toBeVisible({ timeout: 60000 });
-    await expect(page.locator('iframe.pv-judge-frame')).toHaveCount(0);
-    await expect(page.locator('.pv-judge-host')).toBeHidden();
+    await expect(pane.locator('.pv-judge-cover')).toContainText('covered until you vote or skip');
+    await expect(pane.locator('iframe.pv-judge-frame')).toHaveCount(1);
     expect(apiRequests).toEqual([]);
 
+    // Only the verifier got a message; the Gemini panel at the top got no prompt.
     const sent = geminiEvents.filter(event => event.type === 'sent');
     expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain('专业验收团队');
+    expect(sent.some(event => event.text.trim() === PROMPT)).toBe(false);
     expect(sent[0].temporaryChat).toBe(true);
     expect(sent[0].text).toContain('<<<BEGIN ANSWER X>>>');
     expect(sent[0].text).not.toMatch(/chatgpt|claude|openai|anthropic/i);
@@ -222,6 +227,10 @@ test('Verify web mode: Gemini runs hidden on gemini.google.com, no API call, res
     await expect(dock.getByText(/Gemini web mode .*temporary chat on · 1 of 2 cited sources confirmed/)).toBeVisible();
     // The contradicted claim cites a page Gemini did not show: not counted.
     await expect(dock.locator('.pv-unconfirmed')).toHaveCount(1);
+    await expect(dock.getByText('B. Logic Review')).toBeVisible();
+    await expect(dock.locator('.pv-logic-issues').getByText('Calculation error')).toBeVisible();
+    // After the vote the verifier panel is uncovered: Gemini's own report is readable.
+    await expect(pane.locator('.pv-judge-cover')).toBeHidden();
     await expect(dock.locator('.pv-count.pv-status-SUPPORTED').first()).toHaveText('Supported: 1');
     await page.screenshot({ path: testInfo.outputPath('web-2-after-vote.png'), fullPage: true });
     expect(errors).toEqual([]);

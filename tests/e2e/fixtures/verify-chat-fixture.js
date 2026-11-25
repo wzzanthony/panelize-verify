@@ -126,6 +126,10 @@ export function renderGeminiWebJudgeFixture({ chunkDelayMs = 400 } = {}) {
             explanation: 'Construction started in 1887; it opened in 1889.',
             sources: [{ url: 'https://www.britannica.com/topic/Eiffel-Tower-Paris-France', title: 'britannica.com' }] }
         ],
+        logic: {
+          [right]: { verdict: 'SOUND', issues: [] },
+          [wrong]: { verdict: 'FLAWED', issues: [{ type: 'CALCULATION_ERROR', severity: 'high', quote: '1887', explanation: 'Confuses the start of construction with the opening.' }] }
+        },
         verdict: right,
         reasoning: 'Answer ' + right + ' gives the correct year; Answer ' + wrong + ' is contradicted by sources.',
         criteria: { factualAccuracy: { X: xHas1889 ? 5 : 2, Y: xHas1889 ? 2 : 5 } }
@@ -138,6 +142,9 @@ export function renderGeminiWebJudgeFixture({ chunkDelayMs = 400 } = {}) {
       document.body.append(stop);
       const body = response.querySelector('.markdown');
       setTimeout(() => {
+        const report = document.createElement('p');
+        report.textContent = '验收报告：事实核查、逻辑审查、验收结论如下。';
+        body.append(report);
         const pre = document.createElement('pre');
         const code = document.createElement('code');
         code.className = 'language-json';

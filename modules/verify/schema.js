@@ -138,7 +138,7 @@ export function validateJudgeOutput(data) {
   }
   const criteria = {};
   const rawCriteria = data.criteria && typeof data.criteria === 'object' ? data.criteria : {};
-  for (const key of ['factualAccuracy', 'evidenceSupport', 'completeness', 'relevance', 'internalConsistency']) {
+  for (const key of ['factualAccuracy', 'evidenceSupport', 'logicalRigor', 'completeness', 'relevance', 'internalConsistency']) {
     const entry = rawCriteria[key];
     if (entry && typeof entry === 'object') {
       criteria[key] = { X: cleanScore(entry.X), Y: cleanScore(entry.Y) };

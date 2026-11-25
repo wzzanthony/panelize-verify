@@ -1,10 +1,11 @@
-// Panelize Verify — drives a hidden gemini.google.com panel for web mode.
+// Panelize Verify — drives the Gemini verifier panel in web mode.
 //
-// The frame is an ordinary Panelize provider frame (same content scripts,
-// same header rules, same postMessage contract), so it uses the user's own
-// Gemini login and nothing is billed. It sits under an opaque cover while it
-// works: the user never sees Gemini's reply before voting. It stays inside
-// the viewport because Chrome throttles off-screen cross-origin frames.
+// The frame is the gemini.google.com panel shown in the Verify area below
+// the answer panels. It is an ordinary Panelize provider frame (same content
+// scripts, same header rules, same postMessage contract), so it uses the
+// user's own Gemini login and nothing is billed. Each run reloads it into a
+// fresh chat. The Verify dock keeps it covered until the user has voted, so
+// Gemini's reply is never seen first.
 
 import { createCompletionDetector } from '../modules/verify/completion-detector.js';
 import { GeminiApiError } from '../modules/verify/gemini-client.js';
@@ -15,23 +16,36 @@ export const JUDGE_PANEL_ID = 'panelize-verify-judge';
 const TEMP_CHAT_ENABLED = 'PANELIZE_TEMP_CHAT_ENABLED';
 
 export const WEB_ERROR_MESSAGES = {
-  WEB_NOT_READY: 'The Gemini page did not load in the hidden panel. Check that gemini.google.com opens in this browser.',
+  WEB_NOT_READY: 'The Gemini page did not load in the verifier panel. Check that gemini.google.com opens in this browser.',
   WEB_SEND_FAILED: 'Could not send the check to Gemini. Make sure you are signed in at gemini.google.com, then retry.',
   WEB_UNSUPPORTED: 'The Gemini page could not be read. Its layout may have changed.',
   TIMEOUT: 'Gemini did not finish answering in time.',
   CANCELLED: 'The verification was cancelled.'
 };
 
-function defaultCreateFrame(host, url) {
-  const iframe = (host.ownerDocument || document).createElement('iframe');
-  iframe.className = 'pv-judge-frame';
-  iframe.title = 'Gemini (hidden until you vote)';
-  iframe.setAttribute('tabindex', '-1');
-  iframe.setAttribute('aria-hidden', 'true');
-  iframe.setAttribute('allow', 'clipboard-write');
-  iframe.src = url;
-  host.append(iframe);
-  return iframe;
+function loadOnce(iframe, url, timeoutMs) {
+  return new Promise(resolve => {
+    const done = () => {
+      clearTimeout(timer);
+      iframe.removeEventListener('load', done);
+      resolve();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    iframe.addEventListener('load', done);
+    iframe.src = url;
+  });
+}
+
+/**
+ * Navigates the frame and resolves once the new document has loaded. A frame
+ * that already has a page (possibly still loading) goes through about:blank
+ * first, so a late load event from that page is never taken for the new one.
+ */
+async function defaultNavigate(iframe, url, timeoutMs) {
+  if (iframe.getAttribute('src')) {
+    await loadOnce(iframe, 'about:blank', 5000);
+  }
+  await loadOnce(iframe, url, timeoutMs);
 }
 
 function webError(code) {
@@ -40,7 +54,8 @@ function webError(code) {
 
 /**
  * @param {{
- *   host: HTMLElement,
+ *   getFrame: () => any,
+ *   navigate?: (iframe: any, url: string, timeoutMs: number) => Promise<void>,
  *   postToFrame: (panel: any, message: object) => void,
  *   requestState: (panel: any) => Promise<any>,
  *   win?: Window,
@@ -52,12 +67,12 @@ function webError(code) {
  *   readyTimeoutMs?: number,
  *   resendAfterMs?: number,
  *   tempChatWaitMs?: number,
- *   timeoutMs?: number,
- *   createFrame?: (host: HTMLElement, url: string) => any
+ *   timeoutMs?: number
  * }} options
  */
 export function createWebJudgeRunner({
-  host,
+  getFrame,
+  navigate = defaultNavigate,
   postToFrame,
   requestState,
   win = window,
@@ -69,28 +84,43 @@ export function createWebJudgeRunner({
   readyTimeoutMs = 45000,
   resendAfterMs = 20000,
   tempChatWaitMs = 6000,
-  timeoutMs = 300000,
-  createFrame = defaultCreateFrame
+  timeoutMs = 300000
 }) {
+  let running = false;
+  /** Frames that already received a check (their page is no longer a fresh chat). */
+  const usedFrames = new WeakSet();
+
+  /** The verifier frame as a panel-like object, or null when it is not on the page. */
+  function currentPanel() {
+    const iframe = getFrame();
+    return iframe ? { id: JUDGE_PANEL_ID, providerId: 'gemini', iframe } : null;
+  }
+
   /** @type {any} */
   let panel = null;
-  let running = false;
 
   function frameDocument() {
-    return host.ownerDocument || document;
+    return panel?.iframe?.ownerDocument || document;
   }
 
-  function openFrame() {
-    const iframe = createFrame(host, url);
-    host.hidden = false;
-    panel = { id: JUDGE_PANEL_ID, providerId: 'gemini', iframe };
-    return panel;
-  }
-
-  function closeFrame() {
-    panel?.iframe?.remove();
-    panel = null;
-    host.hidden = true;
+  /**
+   * Gets the frame onto a fresh Gemini chat. A page that was loaded on the
+   * Gemini URL and never used for a check is used as it is; reloading a page
+   * that is still loading can end on Chrome's error page.
+   */
+  async function openFrame(signal) {
+    panel = currentPanel();
+    if (!panel) throw webError('WEB_NOT_READY');
+    const fresh = !usedFrames.has(panel.iframe) && panel.iframe.getAttribute('src') === url;
+    if (!fresh) await navigate(panel.iframe, url, readyTimeoutMs);
+    try {
+      return await waitForReady(signal);
+    } catch (error) {
+      if (error?.code !== 'WEB_NOT_READY') throw error;
+      // One more try from a clean load (e.g. the page ended on an error page).
+      await navigate(panel.iframe, url, readyTimeoutMs);
+      return waitForReady(signal);
+    }
   }
 
   function checkAbort(signal) {
@@ -163,8 +193,7 @@ export function createWebJudgeRunner({
     running = true;
     try {
       onProgress('opening');
-      openFrame();
-      await waitForReady(signal);
+      await openFrame(signal);
       const temporaryChat = await enableTemporaryChat(signal);
       if (temporaryChat) {
         await sleep(1500); // let Gemini switch to the temporary chat view
@@ -172,6 +201,7 @@ export function createWebJudgeRunner({
       const baseline = await waitForReady(signal);
 
       onProgress('sending');
+      usedFrames.add(panel.iframe);
       send(text);
       let lastSentAt = now();
       const deadline = lastSentAt + timeoutMs;
@@ -200,14 +230,14 @@ export function createWebJudgeRunner({
       }
       throw webError('TIMEOUT');
     } finally {
-      closeFrame();
       running = false;
     }
   }
 
   return {
     run,
-    /** The hidden frame as a panel-like object while a run is active. */
-    getPanel: () => panel
+    isRunning: () => running,
+    /** The verifier frame as a panel-like object (for message source checks). */
+    getPanel: currentPanel
   };
 }

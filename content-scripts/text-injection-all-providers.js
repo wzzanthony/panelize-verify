@@ -1586,6 +1586,50 @@
   }
 
   // Find and click send button
+  // Claude's composer can take a moment to accept injected text: its send
+  // button may still be disabled at the first try, or a click may land
+  // before the editor state updates, leaving the prompt in the composer.
+  // Retry until the composer empties (Claude clears it once it sends);
+  // press Enter as a last resort. A click is only repeated while the text
+  // is still sitting in the composer, so a prompt is never sent twice.
+  const CLAUDE_SUBMIT_RETRY_DELAYS_MS = [700, 1500, 2500, 4000];
+  const CLAUDE_SENT_CHECK_MS = 1500;
+
+  function composerStillHolds(input, text) {
+    if (!input || !input.isConnected) {
+      return false;
+    }
+    const current = (input.value ?? input.textContent ?? '').replace(/\s+/g, '');
+    const probe = String(text || '').replace(/\s+/g, '').slice(0, 24);
+    return current.length > 0 && (!probe || current.includes(probe));
+  }
+
+  function pressEnterToSend(input) {
+    const options = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+    input.focus?.();
+    input.dispatchEvent(new KeyboardEvent('keydown', options));
+    input.dispatchEvent(new KeyboardEvent('keyup', options));
+  }
+
+  function scheduleClaudeSubmit(input, text, providerMode, firstDelayMs) {
+    let attempt = 0;
+    const tryNow = () => {
+      if (!composerStillHolds(input, text)) {
+        return; // already sent
+      }
+      if (attempt >= CLAUDE_SUBMIT_RETRY_DELAYS_MS.length) {
+        console.warn('[Text Injection] Claude send button did not submit; pressing Enter');
+        pressEnterToSend(input);
+        return;
+      }
+      const clicked = clickSendButton('claude', providerMode);
+      attempt += 1;
+      const next = clicked ? CLAUDE_SENT_CHECK_MS : CLAUDE_SUBMIT_RETRY_DELAYS_MS[attempt - 1];
+      setTimeout(tryNow, next);
+    };
+    setTimeout(tryNow, firstDelayMs);
+  }
+
   function clickSendButton(provider, providerMode = null) {
     if (provider === 'google') {
       return clickGoogleSendButton(providerMode);
@@ -4110,13 +4154,17 @@
         if (shouldAutoSubmit) {
           // Wait for framework-managed composer state to catch up before sending.
           const delay = SLOW_COMPOSER_PROVIDERS.has(provider) ? 800 : 500;
-          setTimeout(() => {
-            console.log('[Text Injection] Attempting to click send button for', provider);
-            const clicked = clickSendButton(provider, providerMode);
-            if (!clicked) {
-              console.warn('[Text Injection] Failed to click send button for', provider);
-            }
-          }, delay);
+          if (provider === 'claude') {
+            scheduleClaudeSubmit(element, text, providerMode, delay);
+          } else {
+            setTimeout(() => {
+              console.log('[Text Injection] Attempting to click send button for', provider);
+              const clicked = clickSendButton(provider, providerMode);
+              if (!clicked) {
+                console.warn('[Text Injection] Failed to click send button for', provider);
+              }
+            }, delay);
+          }
         }
       } else {
         console.error(`[Text Injection] Failed to inject text into ${provider}`);
@@ -4136,10 +4184,14 @@
               console.log('[Text Injection] Text injected on retry into', provider);
               if (shouldAutoSubmit) {
                 const submitDelay = SLOW_COMPOSER_PROVIDERS.has(provider) ? 800 : 500;
-                setTimeout(() => {
-                  console.log('[Text Injection] Attempting to click send button for', provider, 'after retry');
-                  clickSendButton(provider, providerMode);
-                }, submitDelay);
+                if (provider === 'claude') {
+                  scheduleClaudeSubmit(retryElement, text, providerMode, submitDelay);
+                } else {
+                  setTimeout(() => {
+                    console.log('[Text Injection] Attempting to click send button for', provider, 'after retry');
+                    clickSendButton(provider, providerMode);
+                  }, submitDelay);
+                }
               }
             }
           } else if (index === retryDelays.length - 1) {

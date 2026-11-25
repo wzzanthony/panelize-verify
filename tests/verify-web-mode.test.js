@@ -8,6 +8,8 @@ import {
 import { createWebJudgeRunner, GEMINI_WEB_ORIGIN } from '../multi-panel/verify-web-runner.js';
 import { createSession, submitVote } from '../modules/verify/session-state.js';
 import { createVerifyDock, EXTRACT_REQUEST, ANSWER_STATE } from '../multi-panel/verify-dock.js';
+import { relabelAnonymousText } from '../modules/verify/verification-service.js';
+import { DEFAULT_ACCEPTANCE_TEMPLATE } from '../modules/verify/acceptance-template.js';
 import { createMemoryStore, SETTINGS_STORAGE_KEY, normalizeSettings } from '../modules/verify/storage.js';
 
 function makeSession(randomBit = () => 0) {
@@ -37,6 +39,10 @@ const REPLY_DATA = {
     },
     { id: 'C3', statement: 'You should visit in spring.', answers: ['Y'], verifiable: false }
   ],
+  logic: {
+    X: { verdict: 'SOUND', issues: [{ type: 'CALCULATION_ERROR', severity: 'high', quote: 'opened in 1887', explanation: 'Answer X subtracts the wrong years. https://made-up.example/' }] },
+    Y: { verdict: 'SOUND', issues: [] }
+  },
   verdict: 'Y',
   reasoning: 'Answer Y is accurate while Answer X gives the wrong year.',
   criteria: { factualAccuracy: { X: 2, Y: 5 } }
@@ -50,7 +56,12 @@ describe('Verify web mode — message to Gemini', () => {
     expect(message.text).toContain('It was completed in 1889.');
     expect(message.text).not.toMatch(/ChatGPT|Claude/);
     expect(message.text).not.toContain('VOTE-SENTINEL-REASON');
-    expect(message.text).toContain('At most 5 verifiable claims');
+    expect(message.text).toContain('每个回答最多 5 条可核查事实');
+    // Default acceptance template: role, fact check, logic review, verdict.
+    expect(message.text).toContain('专业验收团队');
+    expect(message.text).toContain('逻辑审查');
+    // The output format is always appended, before the data.
+    expect(message.text.indexOf('# 输出格式')).toBeLessThan(message.text.indexOf('<<<BEGIN USER QUESTION>>>'));
     expect(message.redactions).toBeGreaterThan(0);
   });
 });
@@ -140,9 +151,9 @@ function createClock() {
 
 function fakeRunnerEnv({ states, ackTempChat = true }) {
   const clock = createClock();
-  const host = document.createElement('div');
+  let navigations = 0;
   const frameWindow = {};
-  const frame = { contentWindow: frameWindow, removed: false, remove() { this.removed = true; } };
+  const frame = { contentWindow: frameWindow, src: '', getAttribute(name) { return name === 'src' ? this.src : null; } };
   const listeners = new Set();
   const win = {
     addEventListener: (_type, fn) => listeners.add(fn),
@@ -151,11 +162,11 @@ function fakeRunnerEnv({ states, ackTempChat = true }) {
   const posted = [];
   let stateIndex = 0;
   const runner = createWebJudgeRunner({
-    host,
+    getFrame: () => frame,
+    navigate: async (target, url) => { navigations += 1; target.src = url; },
     win: /** @type {any} */ (win),
     now: clock.now,
     sleep: clock.sleep,
-    createFrame: () => frame,
     postToFrame: (_panel, message) => {
       posted.push(message);
       if (message.type === 'ENABLE_TEMP_CHAT' && ackTempChat) {
@@ -169,7 +180,7 @@ function fakeRunnerEnv({ states, ackTempChat = true }) {
     },
     timeoutMs: 60000
   });
-  return { runner, frame, posted, host, advance: () => { stateIndex += 1; } };
+  return { runner, frame, posted, navigations: () => navigations, advance: () => { stateIndex += 1; } };
 }
 
 describe('Verify web mode — hidden Gemini runner', () => {
@@ -186,9 +197,13 @@ describe('Verify web mode — hidden Gemini runner', () => {
     expect(env.posted.filter(message => message.type === 'INJECT_TEXT')).toEqual([
       expect.objectContaining({ text: 'MESSAGE-FOR-GEMINI', autoSubmit: true, context: 'multi-panel' })
     ]);
-    expect(env.frame.removed).toBe(true);
-    expect(env.host.hidden).toBe(true);
-    expect(env.runner.getPanel()).toBeNull();
+    // Each run starts from a freshly loaded page; the frame stays for reading after the vote.
+    expect(env.navigations()).toBe(1);
+    // A second run reloads (the page now holds the first check), the first did not need to.
+    await env.runner.run('MESSAGE-FOR-GEMINI').catch(() => {});
+    expect(env.navigations()).toBe(2);
+    expect(env.runner.getPanel()).toEqual(expect.objectContaining({ providerId: 'gemini', iframe: env.frame }));
+    expect(env.runner.isRunning()).toBe(false);
   });
 
   it('reports when temporary chat could not be turned on', async () => {
@@ -202,7 +217,6 @@ describe('Verify web mode — hidden Gemini runner', () => {
     const env = fakeRunnerEnv({ states: () => [idle] });
     await expect(env.runner.run('MESSAGE-FOR-GEMINI')).rejects.toMatchObject({ code: 'WEB_SEND_FAILED' });
     expect(env.posted.filter(message => message.type === 'INJECT_TEXT')).toHaveLength(2);
-    expect(env.frame.removed).toBe(true);
   });
 
   it('fails when the Gemini page never answers', async () => {
@@ -215,7 +229,7 @@ describe('Verify web mode — hidden Gemini runner', () => {
     const controller = new AbortController();
     controller.abort();
     await expect(env.runner.run('MESSAGE-FOR-GEMINI', { signal: controller.signal })).rejects.toMatchObject({ code: 'CANCELLED' });
-    expect(env.frame.removed).toBe(true);
+    expect(env.posted.filter(message => message.type === 'INJECT_TEXT')).toHaveLength(0);
   });
 });
 
@@ -228,13 +242,16 @@ const flush = async () => {
   for (let i = 0; i < 10; i += 1) await new Promise(resolve => setTimeout(resolve, 0));
 };
 
-function setupDock(settings) {
-  document.body.innerHTML = '<section id="verify-dock"></section>';
+function setupDock(settings, { withGeminiPanel = false } = {}) {
+  document.body.innerHTML = '<div id="verify-region"><section id="verify-dock"></section><aside id="pane" hidden></aside></div>';
   const root = document.getElementById('verify-dock');
+  const judgePane = document.getElementById('pane');
   const panels = [
+    ...(withGeminiPanel ? [{ id: 'p0', providerId: 'gemini', iframe: { contentWindow: {} } }] : []),
     { id: 'p1', providerId: 'chatgpt', iframe: { contentWindow: {} } },
     { id: 'p2', providerId: 'claude', iframe: { contentWindow: {} } }
   ];
+  const removePanels = vi.fn();
   const states = {
     chatgpt: { supported: true, generating: false, hasAnswer: true, text: 'The tower opened in 1887.', lastUserText: 'Q', userTurnCount: 1, lastUserHash: 'u', textHash: 'a' },
     claude: { supported: true, generating: false, hasAnswer: true, text: 'It was completed in 1889.', lastUserText: 'Q', userTurnCount: 1, lastUserHash: 'u', textHash: 'b' }
@@ -259,9 +276,12 @@ function setupDock(settings) {
     createService: () => ({ evaluate: apiEvaluate }),
     createWebService: () => ({ evaluate: webEvaluate }),
     createWebRunner: () => ({ run: vi.fn(), getPanel: () => null }),
+    createJudgeFrame: doc => doc.createElement('div'),
+    judgePane,
+    removePanels,
     confirm: () => true
   });
-  return { dock, root, apiEvaluate, webEvaluate };
+  return { dock, root, apiEvaluate, webEvaluate, judgePane, panels, removePanels };
 }
 
 describe('Verify web mode — dock', () => {
@@ -297,5 +317,73 @@ describe('Verify web mode — dock', () => {
     expect(env.root.textContent).toContain('Gemini Preference');
     expect(env.root.textContent).toContain('Gemini web mode');
     expect(env.root.textContent).toContain('unconfirmed');
+  });
+});
+
+describe('Verify web mode — acceptance template and logic review', () => {
+  it('uses a custom template but always keeps the output format', () => {
+    const message = buildWebJudgeMessage(makeSession(), { template: 'CUSTOM-ACCEPTANCE-RULES' });
+    expect(message.text.startsWith('CUSTOM-ACCEPTANCE-RULES')).toBe(true);
+    expect(message.text).not.toContain('专业验收团队');
+    expect(message.text).toContain('# 输出格式');
+    expect(buildWebJudgeMessage(makeSession(), { template: '   ' }).text.startsWith(DEFAULT_ACCEPTANCE_TEMPLATE)).toBe(true);
+  });
+
+  it('parses the logic review per answer and never leaves "sound" next to a high-severity issue', () => {
+    const evaluation = parseWebJudgeReply(reply(REPLY_DATA), [], { session: makeSession(() => 0) });
+    expect(evaluation.logic.A.verdict).toBe('FLAWED');
+    expect(evaluation.logic.A.issues[0]).toMatchObject({ type: 'CALCULATION_ERROR', severity: 'high', quote: 'opened in 1887' });
+    expect(evaluation.logic.A.issues[0].explanation).toBe('Answer A subtracts the wrong years. [link removed]');
+    expect(evaluation.logic.B).toEqual({ verdict: 'SOUND', issues: [] });
+  });
+
+  it('warns when no logic review came back', () => {
+    const { logic, ...withoutLogic } = REPLY_DATA;
+    const evaluation = parseWebJudgeReply(reply(withoutLogic), [], { session: makeSession() });
+    expect(evaluation.logic).toBeUndefined();
+    expect(evaluation.warnings.join(' ')).toMatch(/no logic review/);
+  });
+
+  it('relabels Chinese X/Y references to A/B', () => {
+    expect(relabelAnonymousText('回答 X 更准确；Y 更好。答案Y有误', { X: 'B', Y: 'A' })).toBe('回答 B 更准确；A 更好。答案 A有误');
+  });
+});
+
+describe('Verify web mode — Gemini as verifier panel', () => {
+  it('treats a Gemini grid panel as the verifier: no Send All, not A or B', async () => {
+    const env = setupDock({ autoVerify: false, webConsentAcknowledged: true }, { withGeminiPanel: true });
+    await env.dock.init();
+    expect(env.dock.isVerifierPanel(env.panels[0])).toBe(true);
+    expect(env.dock.isVerifierPanel(env.panels[1])).toBe(false);
+    await env.dock.captureNow();
+    await flush();
+    const session = env.dock._getCurrentSession();
+    expect([session.answerA.model, session.answerB.model]).toEqual(['chatgpt', 'claude']);
+    const removeButton = [...env.root.querySelectorAll('button')].find(button => button.textContent === 'Remove it from the top');
+    removeButton.click();
+    expect(env.removePanels).toHaveBeenCalledWith(['p0']);
+  });
+
+  it('keeps Gemini as a normal answer panel in API mode', async () => {
+    const env = setupDock({ backend: 'api', consentAcknowledged: true }, { withGeminiPanel: true });
+    await env.dock.init();
+    expect(env.dock.isVerifierPanel(env.panels[0])).toBe(false);
+  });
+
+  it('shows the verifier panel below, covered until the vote', async () => {
+    const env = setupDock({ autoVerify: true, webConsentAcknowledged: true });
+    await env.dock.init();
+    await env.dock.captureNow();
+    await flush();
+    expect(env.judgePane.hidden).toBe(false);
+    expect(env.judgePane.querySelector('.pv-judge-frame')).not.toBeNull();
+    expect(env.judgePane.querySelector('.pv-judge-cover').hidden).toBe(false);
+    expect(document.getElementById('verify-region').classList.contains('pv-with-judge')).toBe(true);
+
+    await env.dock.submitHumanVote('B');
+    await flush();
+    expect(env.judgePane.querySelector('.pv-judge-cover').hidden).toBe(true);
+    expect(env.root.textContent).toContain('B. Logic Review');
+    expect(env.root.textContent).toContain('Calculation error');
   });
 });

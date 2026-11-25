@@ -93,7 +93,10 @@
     </div>
 
     <!-- Panelize Verify: human vote first, then Gemini fact check -->
-    <section id="verify-dock" class="pv-collapsed" aria-label="Verify"></section>
+    <div id="verify-region">
+      <section id="verify-dock" class="pv-collapsed" aria-label="Verify"></section>
+      <aside id="verify-judge-pane" aria-label="Gemini verifier" hidden></aside>
+    </div>
 
     <!-- Store rating prompt (shown after enough successful sends) -->
     <div id="rating-banner" class="rating-banner" role="status" hidden>

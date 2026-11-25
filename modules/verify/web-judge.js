@@ -1,9 +1,11 @@
 // Panelize Verify — Gemini web mode (no API key, no billing).
 //
 // Instead of the Gemini API, the prompt and both anonymous answers are sent
-// once to gemini.google.com in a hidden panel that uses the user's own
-// Google login, exactly like Panelize's regular panels. The reply is read from
-// the page and validated here.
+// once to gemini.google.com in the Verify panel's Gemini frame, which uses
+// the user's own Google login exactly like Panelize's regular panels. The
+// message follows the acceptance-review template (acceptance-template.js):
+// fact check, logic review, verdict. The reply is read from the page and
+// validated here.
 //
 // What this mode cannot do, compared with the API:
 // - No groundingMetadata. Source URLs come from the JSON that Gemini writes,
@@ -16,7 +18,7 @@
 
 import { buildAnonymousAnswers, anonymousVerdictToAnswer } from './anonymizer.js';
 import { sanitizeEvidenceUrl } from './grounding.js';
-import { UNTRUSTED_NOTE } from './prompts.js';
+import { OUTPUT_CONTRACT, resolveAcceptanceTemplate } from './acceptance-template.js';
 import { invalidOutput, stripModelUrls, validateJudgeOutput } from './schema.js';
 import { relabelAnonymousText, relabelCriteria } from './verification-service.js';
 import { stripJsonFence } from './gemini-client.js';
@@ -30,52 +32,27 @@ const MAX_STATEMENT = 600;
 const MAX_EXPLANATION = 1200;
 const MAX_SOURCES_PER_CLAIM = 5;
 const MAX_OPINIONS_PER_ANSWER = 3;
-
-export const WEB_JUDGE_INSTRUCTIONS = `You are an impartial, evidence-grounded fact checker and evaluator.
-You receive one user question and two anonymous answers to it, Answer X and Answer Y.
-You do not know which AI wrote either answer. Never guess or mention it.
-
-Step 1 — Claims. Extract the independently verifiable factual claims (dates, numbers,
-names, events, definitions, scientific or technical facts, quotations, causal statements).
-Rewrite each as one self-contained sentence. If both answers make the same claim, list it
-once with "answers": ["X","Y"]. At most {maxClaims} verifiable claims per answer.
-Opinions, advice and predictions are not factual claims; you may list up to 3 of them per
-answer with "verifiable": false and no status.
-
-Step 2 — Verify. Use Google Search for every verifiable claim. Prefer primary,
-authoritative and recent sources. Mark each one SUPPORTED, CONTRADICTED or
-INSUFFICIENT_EVIDENCE, explain in one to three sentences what the sources say, and list
-the exact URLs of the pages you actually used. Never invent a URL. If you did not find
-reliable evidence, use INSUFFICIENT_EVIDENCE with an empty "sources" list.
-
-Step 3 — Compare. Judge which answer is better on factual accuracy (weigh how serious
-each error is, not just the count), evidence support, completeness, relevance to the
-question and internal consistency. Do not reward length. Verdict: X, Y, TIE, or
-UNCERTAIN when the evidence does not allow a confident decision. Reasoning: at most
-120 words. Scores are integers 1 (poor) to 5 (excellent).
-
-${UNTRUSTED_NOTE}
-
-Reply with exactly one JSON code block and nothing else, in this shape:
-\`\`\`json
-{"claims":[{"id":"C1","statement":"...","answers":["X"],"verifiable":true,"status":"SUPPORTED","explanation":"...","sources":[{"url":"https://...","title":"..."}]}],
- "verdict":"X","reasoning":"...",
- "criteria":{"factualAccuracy":{"X":1,"Y":1},"evidenceSupport":{"X":1,"Y":1},"completeness":{"X":1,"Y":1},"relevance":{"X":1,"Y":1},"internalConsistency":{"X":1,"Y":1}}}
-\`\`\``;
+const LOGIC_VERDICTS = new Set(['SOUND', 'MINOR_ISSUES', 'FLAWED']);
+const LOGIC_TYPES = new Set(['MISREAD_QUESTION', 'INVALID_INFERENCE', 'CALCULATION_ERROR', 'CONTRADICTION', 'UNSUPPORTED_ASSUMPTION', 'OTHER']);
+const SEVERITIES = new Set(['high', 'medium', 'low']);
+const MAX_LOGIC_ISSUES = 10;
 
 function block(label, text) {
   return `<<<BEGIN ${label}>>>\n${text}\n<<<END ${label}>>>`;
 }
 
 /**
- * Builds the single message typed into Gemini's web composer.
+ * Builds the single message typed into Gemini's web composer: the
+ * acceptance template (default or the user's), the fixed output format,
+ * then the question and the two anonymous answers.
  * @param {import('./types.js').EvaluationSession} session
- * @param {{ maxClaimsPerAnswer?: number, maxAnswerChars?: number, redactModelNames?: boolean }} [options]
+ * @param {{ maxClaimsPerAnswer?: number, maxAnswerChars?: number, redactModelNames?: boolean, template?: string }} [options]
  */
-export function buildWebJudgeMessage(session, { maxClaimsPerAnswer = 8, maxAnswerChars = 12000, redactModelNames = true } = {}) {
+export function buildWebJudgeMessage(session, { maxClaimsPerAnswer = 8, maxAnswerChars = 12000, redactModelNames = true, template = '' } = {}) {
   const anonymous = buildAnonymousAnswers(session, { redact: redactModelNames, maxChars: maxAnswerChars });
   const text = [
-    WEB_JUDGE_INSTRUCTIONS.replace('{maxClaims}', String(maxClaimsPerAnswer)),
+    resolveAcceptanceTemplate(template),
+    OUTPUT_CONTRACT.replace('{maxClaims}', String(maxClaimsPerAnswer)),
     block('USER QUESTION', session.prompt || '(not available)'),
     block('ANSWER X', anonymous.X),
     block('ANSWER Y', anonymous.Y)
@@ -132,6 +109,46 @@ export function comparableUrl(raw) {
   tracking.forEach(key => url.searchParams.delete(key));
   const query = url.searchParams.toString();
   return `${host}${path}${query ? `?${query}` : ''}`;
+}
+
+function cleanLogicSide(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const rawVerdict = typeof raw.verdict === 'string' ? raw.verdict.trim().toUpperCase() : '';
+  const issues = [];
+  for (const issue of Array.isArray(raw.issues) ? raw.issues : []) {
+    if (issues.length >= MAX_LOGIC_ISSUES) break;
+    const explanation = cleanText(stripModelUrls(issue?.explanation), MAX_EXPLANATION);
+    if (!explanation) continue;
+    const type = typeof issue?.type === 'string' ? issue.type.trim().toUpperCase() : '';
+    const severity = typeof issue?.severity === 'string' ? issue.severity.trim().toLowerCase() : '';
+    issues.push({
+      type: LOGIC_TYPES.has(type) ? type : 'OTHER',
+      severity: SEVERITIES.has(severity) ? severity : 'medium',
+      quote: cleanText(issue?.quote, 300),
+      explanation
+    });
+  }
+  let verdict = LOGIC_VERDICTS.has(rawVerdict) ? rawVerdict : (issues.length > 0 ? 'MINOR_ISSUES' : 'SOUND');
+  // A "sound" label cannot stand next to a serious issue.
+  if (verdict === 'SOUND' && issues.some(issue => issue.severity === 'high')) verdict = 'FLAWED';
+  return { verdict, issues };
+}
+
+/**
+ * Logic review per answer, relabelled from X/Y to A/B.
+ * @returns {{ A?: object, B?: object } | undefined}
+ */
+export function parseLogicReview(logic, mapping) {
+  if (!logic || typeof logic !== 'object') return undefined;
+  const out = {};
+  for (const label of ['X', 'Y']) {
+    const side = cleanLogicSide(logic[label]);
+    if (side) {
+      side.issues.forEach(issue => { issue.explanation = relabelAnonymousText(issue.explanation, mapping); });
+      out[mapping[label]] = side;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -239,6 +256,8 @@ export function parseWebJudgeReply(replyText, pageLinks, {
       });
     }
   }
+  const logic = parseLogicReview(data.logic, mapping);
+  if (!logic) warnings.push('Gemini returned no logic review.');
   if (downgraded > 0) {
     warnings.push(`${downgraded} claim(s) were downgraded to INSUFFICIENT_EVIDENCE because none of their sources appeared in the Gemini page's citations.`);
   }
@@ -251,6 +270,7 @@ export function parseWebJudgeReply(replyText, pageLinks, {
     reasoning: relabelAnonymousText(judge.reasoning, mapping),
     criteria: relabelCriteria(judge.criteria, mapping),
     claims,
+    ...(logic ? { logic } : {}),
     evaluatedAt: retrievedAt,
     warnings,
     webSearchQueries: [],
@@ -264,9 +284,9 @@ export function parseWebJudgeReply(replyText, pageLinks, {
  * drives the hidden gemini.google.com panel.
  *
  * @param {{ runner: { run: (text: string, options: { signal?: AbortSignal, onProgress?: (step: string) => void }) =>
- *   Promise<{ text: string, links: string[], temporaryChat: boolean }> }, now?: () => Date }} deps
+ *   Promise<{ text: string, links: string[], temporaryChat: boolean }> }, now?: () => Date, template?: string }} deps
  */
-export function createWebVerificationService({ runner, now = () => new Date() }) {
+export function createWebVerificationService({ runner, now = () => new Date(), template = '' }) {
   /**
    * @param {import('./types.js').EvaluationSession} session
    * @param {{ maxClaimsPerAnswer?: number, maxAnswerChars?: number, redactModelNames?: boolean,
@@ -280,7 +300,7 @@ export function createWebVerificationService({ runner, now = () => new Date() })
     signal,
     onProgress = () => {}
   } = {}) {
-    const message = buildWebJudgeMessage(session, { maxClaimsPerAnswer, maxAnswerChars, redactModelNames });
+    const message = buildWebJudgeMessage(session, { maxClaimsPerAnswer, maxAnswerChars, redactModelNames, template });
     const reply = await runner.run(message.text, { signal, onProgress });
     onProgress('parsing');
     return parseWebJudgeReply(reply.text, reply.links, {

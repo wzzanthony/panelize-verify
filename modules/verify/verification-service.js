@@ -47,7 +47,10 @@ export function relabelAnonymousText(text, mapping) {
   return String(text || '')
     .replace(/\b(Answers?)\s+([XY])(\s*(?:,|&|and|or|vs\.?)\s*)([XY])\b/g, (_, word, first, joiner, second) =>
       `${word} ${mapping[first]}${joiner}${mapping[second]}`)
-    .replace(/\b(Answers?)\s+([XY])\b/g, (_, word, label) => `${word} ${mapping[label]}`);
+    .replace(/\b(Answers?)\s+([XY])\b/g, (_, word, label) => `${word} ${mapping[label]}`)
+    // Chinese: 回答 X / 答案Y / X 更好
+    .replace(/(回答|答案)\s*([XY])(?![A-Za-z])/g, (_, word, label) => `${word} ${mapping[label]}`)
+    .replace(/(^|[^A-Za-z])([XY])(\s*)(更好|较好|胜出|更优)/g, (_, before, label, space, word) => `${before}${mapping[label]}${space}${word}`);
 }
 
 export function relabelCriteria(criteria, mapping) {

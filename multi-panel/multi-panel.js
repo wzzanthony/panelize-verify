@@ -2181,9 +2181,10 @@ export async function broadcastMessage(text, autoSubmit = true) {
 
     cleanStalePanelRetryState(panels, pendingFillImageIdsByPanel, failedFillPanelIds);
 
-    const targetPanels = hasImages
+    // In Verify web mode a Gemini panel is the verifier and gets no prompt.
+    const targetPanels = (hasImages
       ? getFillTargetPanels(panels, failedFillPanelIds)
-      : panels;
+      : panels).filter(panel => !verifyDock?.isVerifierPanel(panel));
     const imageSkippedPanels = hasImages
       ? targetPanels.filter(panel => !supportsImageUpload(panel.providerId))
       : [];
@@ -2439,7 +2440,9 @@ async function setupVerifyDock() {
     findMessageSourcePanel,
     getProviderName: providerId => getProviderById(providerId)?.name || providerId,
     store: createIndexedDbStore(),
-    showToast
+    showToast,
+    judgePane: document.getElementById('verify-judge-pane'),
+    removePanels: panelIds => panelIds.forEach(panelId => removePanel(panelId))
   });
   try {
     await verifyDock.init();
@@ -3484,6 +3487,9 @@ async function triggerSendButtons() {
 
     // Send TRIGGER_SEND message to all panels
     panels.forEach(panel => {
+      if (verifyDock?.isVerifierPanel(panel)) {
+        return;
+      }
       if (panel.iframe && panel.iframe.contentWindow) {
         postToPanelFrame(panel, {
           type: 'TRIGGER_SEND',

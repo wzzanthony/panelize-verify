@@ -26,7 +26,7 @@ Verify 面板 → 右侧 ⚙ → 「How Gemini checks the answers」：
 
 | | 网页模式（默认） | API 模式 |
 |---|---|---|
-| 怎么调用 | 在隐藏面板里打开 gemini.google.com，用你的 Google 登录，和 Panelize 其他面板一样 | Gemini API + Google Search Grounding |
+| 怎么调用 | 答案面板下方的「Gemini verifier」面板里打开 gemini.google.com，用你的 Google 登录，和 Panelize 其他面板一样 | Gemini API + Google Search Grounding |
 | 需要什么 | 在这个浏览器里登录过 Gemini | API Key，且 Key 所在项目绑定结算账号 |
 | 费用 | 不计费 | 每月 5000 次搜索免费，之后按次计费 |
 | 来源可靠性 | 较弱：来源是 Gemini 在回答里写的链接，只有同时出现在 Gemini 页面引用里的才算数 | 较强：来源来自结构化的 groundingMetadata |
@@ -39,9 +39,26 @@ Verify 面板 → 右侧 ⚙ → 「How Gemini checks the answers」：
 
 1. 先在 Chrome 里打开一次 https://gemini.google.com 并登录。
 2. 设置里保持「Web mode」，勾选「I understand that web mode sends…」，Save。
-3. 之后每次比较：右上角出现一张小卡片「Gemini web is checking the answers」，下面盖着真正的 Gemini 页面（不能放到屏幕外，
-   否则 Chrome 会降低后台跨域 iframe 的速度）。点卡片上的 Cancel 可中止。完成后 iframe 自动移除。
-4. 超时默认 300 秒，可在设置里改（60–900）。
+3. 布局：**上方是两个答题面板（A、B），下方 Verify 区域左边是投票和结果，右边是「Gemini verifier」面板**。
+   勾选确认后，网页模式下 Gemini 只做验证：顶部如果还有 Gemini 面板，它**不会收到 Send All**，也不算 A/B；
+   Verify 面板里会提示，并给一个「Remove it from the top」按钮把它移掉。（没勾选确认前，Panelize 的面板行为不变。）
+4. 每次比较：verifier 面板打开一个新的 Gemini 对话（尽量开临时对话），发送验收消息。**投票前它被盖住**，
+   投票（或跳过）后揭开，可以直接读 Gemini 写的完整验收报告；Verify 面板里同时显示解析后的结构化结果。
+   盖住时有 Cancel 按钮可中止。
+5. 超时默认 300 秒，可在设置里改（60–900）。
+
+### 验收模板（网页模式）
+
+发给 Gemini 的消息 = **验收模板** + 固定的输出格式 + 问题和两个匿名回答。默认模板（`modules/verify/acceptance-template.js`）：
+
+- **角色**：Gemini 扮演独立的专业验收团队：事实核查员、逻辑审查员、首席验收官。
+- **第一步 事实核查**：把回答拆成可独立核查的最小事实单元，改写成自包含的句子；对每条先提核查问题、再用 Google 搜索**独立**查证（不照着回答的措辞找支持证据）；给出 SUPPORTED / CONTRADICTED / INSUFFICIENT_EVIDENCE，只写实际用到的网址。
+- **第二步 逻辑审查**：答非所问、推理跳步/偷换概念/以偏概全/因果倒置/循环论证、计算与单位错误、自相矛盾、未说明的假设；每个问题摘录原文、标严重程度。
+- **第三步 验收结论**：事实准确性、证据支撑、逻辑严密性、完整性、相关性各 1–5 分；严重程度重于数量；不因篇幅、语气、排版、先后顺序加分；结论 X / Y / TIE / UNCERTAIN。
+
+设计依据：事实拆分与逐条搜索核查参考 SAFE（Wei et al. 2024）和 FActScore（Min et al. 2023）；「先提问再独立查证」参考 Chain-of-Verification 的 factored 变体（Dhuliawala et al. 2023）；逻辑错误类型参考 ROSCOE（Golovneva et al. 2023）；去除位置、长度、风格偏差参考 MT-Bench 的 LLM-as-a-judge 研究（Zheng et al. 2023）。
+
+模板可以在 Verify 设置里直接改（「Acceptance template」文本框，「Restore default template」恢复默认）。输出格式部分不在文本框里、始终自动附加，所以改模板不会让结果解析失败。API 模式仍用原来的三步流程，不使用这个模板。
 
 ### 2b. API 模式（BYOK）
 
@@ -108,8 +125,9 @@ Key 的存放位置：扩展自身 origin 的 IndexedDB（`PanelizeVerifyDB`）�
 
 ### 修改的原有文件
 
-- `multi-panel/multi-panel.js`：+2 个 import、`setupVerifyDock()`、`broadcastMessage` 里发送前后各一行钩子。
-- `multi-panel/multi-panel.html`：工具栏 Verify 按钮、`#verify-dock` 容器、标题。
+- `multi-panel/multi-panel.js`：+2 个 import、`setupVerifyDock()`、`broadcastMessage` 里发送前后各一行钩子；网页模式下 Send All / 触发发送跳过 Gemini 验证者面板。
+- `multi-panel/multi-panel.html`：工具栏 Verify 按钮、`#verify-region`（`#verify-dock` + `#verify-judge-pane`）、标题。
+- `content-scripts/text-injection-all-providers.js`：Claude 自动发送改为带重试与「输入框已清空」确认（见第 7 节第 16 条）。
 - `manifest.json`：ChatGPT / Claude / Gemini 的 content script 列表加 `answer-extractor.js`；host 权限只加了 `https://generativelanguage.googleapis.com/*`；`short_name`。
 - `_locales/*/messages.json`：扩展名改为 `Panelize Verify - …`。
 - `tests/store-listing-locales.test.js`：`short_name` 断言随改名更新。
@@ -123,15 +141,16 @@ Key 的存放位置：扩展自身 origin 的 IndexedDB（`PanelizeVerifyDB`）�
 
 一次比较 = 在 gemini.google.com 上发**一条**消息（`modules/verify/web-judge.js` 组装，`multi-panel/verify-web-runner.js` 发送和读取）：
 
-1. 隐藏面板加载 `https://gemini.google.com/app`，等 Panelize 的 content script 就绪；
+1. verifier 面板加载新的 `https://gemini.google.com/app`（首次且未用过的页面直接使用），等 Panelize 的 content script 就绪；
    发 `ENABLE_TEMP_CHAT`（Panelize 原有的临时对话机制），等页面确认。
-2. 用 Panelize 原有的 `INJECT_TEXT` 把消息填进输入框并发送。消息 = 说明（抽陈述 → 用 Google 搜索核查并列出用到的网址 → 盲比较）+ Prompt + 匿名 X/Y 回答，要求只回一个 JSON 代码块。
+2. 用 Panelize 原有的 `INJECT_TEXT` 把消息填进输入框并发送。消息 = 验收模板 + 输出格式 + Prompt + 匿名 X/Y 回答；要求先写给人看的验收报告，最后附一个 JSON 代码块（事实、逻辑审查、结论、评分）。
 3. 用和 A/B 面板同样的完成判定（新的用户轮、无停止按钮、文本稳定 4 秒）读取回答，同时读取 Gemini 页面在这条回答里渲染的所有链接（不含代码块）。
 4. 本地校验：
    - JSON 结构、裁决枚举、1–5 分，和 API 模式共用校验函数；
    - 来源网址先做安全检查（只允许 http/https），再与页面链接比对（会展开 `google.com/url?q=` 跳转、去掉 `utm_*`）。**只有比对上的才算「已确认」来源**，其余显示为 unconfirmed；
    - 模型说 SUPPORTED / CONTRADICTED 但没有任何已确认来源 → 降级为 `INSUFFICIENT_EVIDENCE`；页面上一个链接都没读到 → 所有陈述都不算已核实，并给出警告。
-5. 20 秒内没出现新的用户轮会重发一次；再失败报「请确认已登录 gemini.google.com」。
+5. 20 秒内没出现新的用户轮会重发一次；再失败报「请确认已登录 gemini.google.com」。页面没加载起来（例如落到错误页）会自动重载一次。
+6. 逻辑审查按回答解析为 SOUND / MINOR_ISSUES / FLAWED 加问题列表；标了 high 严重度却写 SOUND 的，改为 FLAWED。
 
 投票前隐藏、盲评（不含模型名、投票）、X/Y 随机，和 API 模式完全相同。
 
@@ -208,6 +227,8 @@ npm run test:e2e:verify  # 真实 Chromium 加载扩展的端到端流程
     消息较长（两份回答各最多 12000 字符），Gemini 网页输入框若有长度上限，可在设置里调小「Max characters per answer」。
 14. 网页模式下 Gemini 是否真的搜索由它自己决定，扩展无法强制；也拿不到搜索次数和 token 用量。
 15. 网页模式同一时间只跑一个核查；另一个比较需要等它结束。
+
+16. Claude 的 Send All：Panelize 原本只在填字 0.5 秒后点一次发送按钮，按钮还没就绪时问题会停在输入框里。现在会重试点击，直到输入框被清空（说明已发出），最后一招是模拟回车；输入框仍有这段文字时才会重点，所以不会重复发送。真实 claude.ai 上未验证。
 
 ### 尚未实现
 

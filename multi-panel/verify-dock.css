@@ -537,34 +537,47 @@
   font-size: 12px;
 }
 
-/* Web mode: the hidden Gemini panel. It must stay inside the viewport and
-   rendered (Chrome throttles off-screen cross-origin frames), so an opaque
-   cover sits on top of it instead of hiding it. */
-.pv-judge-host {
+/* Verify region: the dock, and in web mode the Gemini verifier beside it. */
+#verify-region {
+  flex-shrink: 0;
+  display: flex;
+  align-items: stretch;
+  min-height: 41px;
+}
+
+#verify-region > #verify-dock {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#verify-region.pv-with-judge {
+  height: 48vh;
+}
+
+#verify-region.pv-with-judge > #verify-dock {
+  max-height: none;
+}
+
+#verify-judge-pane {
   --pv-bg: #ffffff;
   --pv-text: #222222;
   --pv-muted: #6b6b6b;
   --pv-border: #e0e0e0;
   --pv-accent: #1a73e8;
   --pv-accent-text: #ffffff;
-  position: fixed;
-  /* Over the panel grid, below the panel headers: never over the vote form. */
-  top: 110px;
-  right: 24px;
-  width: min(300px, calc(100vw - 48px));
-  height: 104px;
-  z-index: 9000;
-  border: 1px solid var(--pv-border);
-  border-radius: 12px;
-  overflow: hidden;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  flex: 0 0 44%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-top: 1px solid var(--pv-border);
+  border-left: 1px solid var(--pv-border);
   background: var(--pv-bg);
   color: var(--pv-text);
   font-size: 13px;
 }
 
-[data-theme="dark"] .pv-judge-host {
-  --pv-bg: #2a2a2a;
+[data-theme="dark"] #verify-judge-pane {
+  --pv-bg: #262626;
   --pv-text: #e6e6e6;
   --pv-muted: #a0a0a0;
   --pv-border: #444444;
@@ -572,20 +585,39 @@
   --pv-accent-text: #102030;
 }
 
-.pv-judge-host[hidden] {
+#verify-judge-pane[hidden] {
   display: none;
 }
 
-/* Gemini gets a desktop-sized viewport (its usual layout); the small host
-   clips it, and the cover hides it. */
+/* Collapsed dock while a check runs: keep the frame rendered (Chrome
+   throttles hidden cross-origin frames), as a short covered strip. */
+#verify-judge-pane.pv-judge-mini {
+  height: 120px;
+  align-self: flex-end;
+}
+
+.pv-judge-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 40px;
+  padding: 0 12px;
+  flex-shrink: 0;
+}
+
+.pv-judge-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .pv-judge-frame {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 1024px;
-  height: 720px;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   border: 0;
-  pointer-events: none;
 }
 
 .pv-judge-cover {
@@ -596,12 +628,55 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 16px;
   text-align: center;
   background: var(--pv-bg);
 }
 
+.pv-judge-cover[hidden] {
+  display: none;
+}
+
 .pv-judge-cover p {
   margin: 0;
+}
+
+/* Logic review */
+.pv-logic-verdict {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid currentColor;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.pv-logic-SOUND { color: var(--pv-supported, #1e7e34); }
+.pv-logic-MINOR_ISSUES { color: var(--pv-insufficient, #8a6d00); }
+.pv-logic-FLAWED { color: var(--pv-contradicted, #c62828); }
+
+.pv-logic-issues {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.pv-sev {
+  font-size: 11px;
+  text-transform: uppercase;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+}
+
+.pv-sev-high { color: var(--pv-contradicted, #c62828); }
+.pv-sev-medium { color: var(--pv-insufficient, #8a6d00); }
+.pv-sev-low { color: var(--pv-unverifiable, #5f6368); }
+
+.pv-template {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  resize: vertical;
 }

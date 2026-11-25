@@ -21,7 +21,8 @@ import { compareJudgements, AGREEMENT_LABELS, computeAgreementStats } from '../m
 import { createGeminiClient } from '../modules/verify/gemini-client.js';
 import { createGeminiVerificationService } from '../modules/verify/verification-service.js';
 import { createWebVerificationService } from '../modules/verify/web-judge.js';
-import { createWebJudgeRunner } from './verify-web-runner.js';
+import { createWebJudgeRunner, GEMINI_WEB_URL } from './verify-web-runner.js';
+import { DEFAULT_ACCEPTANCE_TEMPLATE } from '../modules/verify/acceptance-template.js';
 import {
   loadVerifySettings,
   saveVerifySettings,
@@ -57,7 +58,7 @@ const PHASE_LABELS = {
   'no-frame': 'panel not loaded'
 };
 const PROGRESS_LABELS = {
-  opening: 'Opening Gemini in a hidden panel…',
+  opening: 'Opening a fresh Gemini chat…',
   sending: 'Sending the check to Gemini…',
   waiting: 'Gemini is searching and checking claims…',
   parsing: 'Reading Gemini\'s reply…',
@@ -123,7 +124,10 @@ function safeLink(url, text) {
  *   settingsStorage?: any,
  *   createService?: (settings: object, apiKey: string) => { evaluate: Function },
  *   createWebService?: (settings: object, runner: any) => { evaluate: Function },
- *   createWebRunner?: (host: HTMLElement, settings: object) => any,
+ *   createWebRunner?: (getFrame: () => any, settings: object) => any,
+ *   judgePane?: HTMLElement | null,
+ *   createJudgeFrame?: (doc: Document, load: boolean) => any,
+ *   removePanels?: (panelIds: string[]) => void,
  *   showToast?: (message: string) => void,
  *   confirm?: (message: string) => boolean,
  *   now?: () => number,
@@ -145,15 +149,24 @@ export function createVerifyDock(options) {
     confirm = message => window.confirm(message),
     now = () => Date.now(),
     schedule = (fn, ms) => setTimeout(fn, ms),
-    cancelSchedule = handle => clearTimeout(handle)
+    cancelSchedule = handle => clearTimeout(handle),
+    judgePane = null,
+    removePanels = null,
+    createJudgeFrame = (doc, load) => {
+      const iframe = doc.createElement('iframe');
+      iframe.title = 'Gemini verifier';
+      iframe.setAttribute('allow', 'clipboard-write');
+      if (load) iframe.src = GEMINI_WEB_URL;
+      return iframe;
+    }
   } = options;
   const createService = options.createService || ((settings, apiKey) => createGeminiVerificationService({
     client: createGeminiClient({ apiKey, model: settings.model, timeoutMs: settings.timeoutMs })
   }));
   const createWebService = options.createWebService
-    || ((_settings, runner) => createWebVerificationService({ runner }));
-  const createWebRunner = options.createWebRunner || ((host, current) => createWebJudgeRunner({
-    host,
+    || ((current, runner) => createWebVerificationService({ runner, template: current.webTemplate }));
+  const createWebRunner = options.createWebRunner || ((getFrame, current) => createWebJudgeRunner({
+    getFrame,
     postToFrame: postToPanelFrame,
     requestState,
     timeoutMs: current.webTimeoutMs
@@ -177,10 +190,14 @@ export function createVerifyDock(options) {
   let draftReason = '';
   let errorMessage = '';
   let destroyed = false;
-  /** @type {HTMLElement | null} */
-  let judgeHost = null;
   let webRunner = null;
   let webRunSessionId = null;
+  /** Session whose check is in (or was last run in) the Gemini verifier panel. */
+  let judgedSessionId = null;
+  /** @type {any} */
+  let judgeFrame = null;
+  /** @type {Record<string, HTMLElement>} */
+  let paneParts = {};
 
   // ===== Persistence =====
 
@@ -238,14 +255,27 @@ export function createVerifyDock(options) {
     });
   }
 
-  /** The visible panels plus the hidden Gemini judge frame while it runs. */
+  /** The answer panels plus the Gemini verifier frame. */
   function allFrames() {
-    const judge = webRunner?.getPanel?.();
+    const judge = judgeFrame ? { id: 'panelize-verify-judge', providerId: 'gemini', iframe: judgeFrame } : null;
     return judge ? [...getPanels(), judge] : getPanels();
   }
 
+  /**
+   * Once web mode is set up (its consent given), Gemini is the verifier: a
+   * Gemini panel in the grid neither receives Send All nor counts as answer
+   * A or B. Before that, Panelize's panels behave as they always have.
+   */
+  function isVerifierPanel(panel) {
+    return isWebBackend() && Boolean(settings?.webConsentAcknowledged) && panel?.providerId === 'gemini';
+  }
+
+  function answerPanels() {
+    return getPanels().filter(panel => !isVerifierPanel(panel));
+  }
+
   function comparedPanels() {
-    const panels = getPanels();
+    const panels = answerPanels();
     return panels.length >= 2 ? { A: panels[0], B: panels[1] } : null;
   }
 
@@ -437,27 +467,64 @@ export function createVerifyDock(options) {
     return false;
   }
 
-  function ensureJudgeHost() {
-    if (judgeHost) return judgeHost;
-    const doc = root.ownerDocument || document;
-    judgeHost = doc.createElement('div');
-    judgeHost.className = 'pv-judge-host';
-    judgeHost.hidden = true;
-    const cover = el('div', { class: 'pv-judge-cover', role: 'status' }, [
-      el('p', {}, [el('span', { class: 'pv-spinner', 'aria-hidden': 'true' }), ' Gemini web is checking the answers']),
-      el('p', { class: 'pv-muted', text: 'Its reply stays hidden until you vote.' }),
-      el('button', {
-        type: 'button', class: 'pv-btn',
-        onclick: () => { if (webRunSessionId) cancelVerification(webRunSessionId); }
-      }, 'Cancel')
-    ]);
-    judgeHost.append(cover);
-    doc.body.append(judgeHost);
-    return judgeHost;
+  // ===== Gemini verifier panel (web mode) =====
+
+  function ensureJudgeFrame() {
+    if (judgeFrame || !paneParts.body) return judgeFrame;
+    // While a check is starting, the runner loads the page itself (once).
+    judgeFrame = createJudgeFrame(paneParts.body.ownerDocument || document, !webRunSessionId);
+    judgeFrame.classList.add('pv-judge-frame');
+    paneParts.body.prepend(judgeFrame);
+    return judgeFrame;
+  }
+
+  function buildJudgePane() {
+    if (!judgePane || paneParts.body) return;
+    paneParts.status = el('span', { class: 'pv-muted pv-judge-status' });
+    paneParts.coverText = el('p', { class: 'pv-judge-cover-text' });
+    paneParts.cancel = el('button', {
+      type: 'button', class: 'pv-btn',
+      onclick: () => { if (webRunSessionId) cancelVerification(webRunSessionId); }
+    }, 'Cancel');
+    paneParts.cover = el('div', { class: 'pv-judge-cover', role: 'status' }, [paneParts.coverText, paneParts.cancel]);
+    paneParts.body = el('div', { class: 'pv-judge-body' }, [paneParts.cover]);
+    judgePane.replaceChildren(
+      el('div', { class: 'pv-judge-head' }, [el('strong', { text: 'Gemini verifier' }), paneParts.status]),
+      paneParts.body
+    );
+  }
+
+  /** Whether Gemini's page must stay covered: a check is running or awaits the vote. */
+  function judgeCovered() {
+    if (webRunSessionId) return true;
+    const judged = judgedSessionId ? sessions.get(judgedSessionId) : null;
+    return Boolean(judged && !isVoteLocked(judged));
+  }
+
+  function updateJudgePane() {
+    if (!judgePane) return;
+    const running = Boolean(webRunSessionId);
+    const visible = isWebBackend() && (expanded || running);
+    judgePane.hidden = !visible;
+    judgePane.classList.toggle('pv-judge-mini', running && !expanded);
+    root.parentElement?.classList.toggle('pv-with-judge', visible && expanded);
+    if (!visible) return;
+    buildJudgePane();
+    ensureJudgeFrame();
+    const covered = judgeCovered();
+    paneParts.cover.hidden = !covered;
+    paneParts.cancel.hidden = !running;
+    const failed = sessions.get(judgedSessionId)?.verification?.status === 'error';
+    paneParts.coverText.textContent = running
+      ? `${PROGRESS_LABELS[progress.get(webRunSessionId)] || 'Gemini is checking…'} Gemini's page stays covered until you vote.`
+      : failed
+        ? 'Gemini\'s check failed (see the Verify panel). Its page stays covered until you vote or skip.'
+        : 'Gemini has finished. Its page stays covered until you vote or skip.';
+    paneParts.status.textContent = running ? ' · checking' : covered ? ' · waiting for your vote' : ' · gemini.google.com';
   }
 
   function getWebRunner() {
-    if (!webRunner) webRunner = createWebRunner(ensureJudgeHost(), settings);
+    if (!webRunner) webRunner = createWebRunner(ensureJudgeFrame, settings);
     return webRunner;
   }
 
@@ -479,6 +546,9 @@ export function createVerifyDock(options) {
     let apiKey = '';
     if (web) {
       webRunSessionId = sessionId;
+      judgedSessionId = sessionId;
+      setExpanded(true);
+      render();
     } else {
       apiKey = await store.getApiKey().catch(() => '');
       if (!apiKey) {
@@ -557,6 +627,7 @@ export function createVerifyDock(options) {
     root.classList.toggle('pv-collapsed', !expanded);
     toggleButton?.classList.toggle('active', expanded);
     toggleButton?.setAttribute('aria-pressed', String(expanded));
+    updateJudgePane();
   }
 
   function sideStatus(label) {
@@ -607,15 +678,27 @@ export function createVerifyDock(options) {
   function renderAnswersSection(session) {
     const pair = comparedPanels();
     const notes = [];
-    if (!pair) notes.push('Verify compares the first two panels. Add a second panel to start.');
-    else if (getPanels().length > 2) notes.push('More than two panels are open: the first two are compared as A and B.');
+    const verifierPanels = getPanels().filter(isVerifierPanel);
+    if (!pair) notes.push('Verify compares two answer panels. Add a second panel to start.');
+    else if (answerPanels().length > 2) notes.push('More than two answer panels are open: the first two are compared as A and B.');
+    const extra = [];
+    if (verifierPanels.length > 0) {
+      extra.push(el('p', { class: 'pv-note' }, [
+        'In web mode Gemini only verifies (in the panel on the right). The Gemini panel above does not receive Send All. ',
+        removePanels ? el('button', {
+          type: 'button', class: 'pv-btn',
+          onclick: () => removePanels(verifierPanels.map(panel => panel.id))
+        }, 'Remove it from the top') : null
+      ]));
+    }
     if (!session) {
       return el('section', { class: 'pv-section pv-answers' }, [
         el('h3', { text: 'Answers' }),
         el('p', { class: 'pv-muted', text: capture?.sent
           ? 'Waiting for both replies to finish…'
           : 'Send a prompt with "Send All". Both replies are captured when they finish.' }),
-        ...notes.map(note => el('p', { class: 'pv-note', text: note }))
+        ...notes.map(note => el('p', { class: 'pv-note', text: note })),
+        ...extra
       ]);
     }
     const answer = (label, record) => el('details', { class: 'pv-answer' }, [
@@ -630,7 +713,8 @@ export function createVerifyDock(options) {
       el('p', { class: 'pv-prompt' }, [el('span', { class: 'pv-muted', text: 'Prompt: ' }), session.prompt || '(none)']),
       answer('A', session.answerA),
       answer('B', session.answerB),
-      ...notes.map(note => el('p', { class: 'pv-note', text: note }))
+      ...notes.map(note => el('p', { class: 'pv-note', text: note })),
+      ...extra
     ]);
   }
 
@@ -775,7 +859,7 @@ export function createVerifyDock(options) {
 
   function renderCriteria(criteria) {
     const names = {
-      factualAccuracy: 'Factual accuracy', evidenceSupport: 'Evidence support', completeness: 'Completeness',
+      factualAccuracy: 'Factual accuracy', evidenceSupport: 'Evidence support', logicalRigor: 'Logical rigor', completeness: 'Completeness',
       relevance: 'Relevance', internalConsistency: 'Internal consistency'
     };
     const rows = Object.entries(criteria || {}).filter(([key]) => names[key]);
@@ -785,6 +869,34 @@ export function createVerifyDock(options) {
       el('tbody', {}, rows.map(([key, scores]) => el('tr', {}, [
         el('td', { text: names[key] }), el('td', { text: scores.A ?? '—' }), el('td', { text: scores.B ?? '—' })
       ])))
+    ]);
+  }
+
+  const LOGIC_VERDICT_LABELS = { SOUND: 'Sound', MINOR_ISSUES: 'Minor issues', FLAWED: 'Flawed' };
+  const LOGIC_TYPE_LABELS = {
+    MISREAD_QUESTION: 'Misreads the question',
+    INVALID_INFERENCE: 'Invalid inference',
+    CALCULATION_ERROR: 'Calculation error',
+    CONTRADICTION: 'Self-contradiction',
+    UNSUPPORTED_ASSUMPTION: 'Unsupported assumption',
+    OTHER: 'Other'
+  };
+
+  function renderLogicColumn(session, label) {
+    const record = label === 'A' ? session.answerA : session.answerB;
+    const review = session.geminiEvaluation.logic?.[label];
+    const head = el('h4', { text: `Answer ${label} · ${record.modelName || record.model}` });
+    if (!review) return el('div', { class: 'pv-facts-col' }, [head, el('p', { class: 'pv-muted', text: 'No logic review returned.' })]);
+    return el('div', { class: 'pv-facts-col' }, [
+      head,
+      el('span', { class: `pv-logic-verdict pv-logic-${review.verdict}`, text: LOGIC_VERDICT_LABELS[review.verdict] }),
+      review.issues.length > 0
+        ? el('ul', { class: 'pv-logic-issues' }, review.issues.map(issue => el('li', {}, [
+          el('span', { class: `pv-sev pv-sev-${issue.severity}`, text: issue.severity }),
+          ' ', el('strong', { text: LOGIC_TYPE_LABELS[issue.type] || issue.type }), ': ', issue.explanation,
+          issue.quote ? el('div', { class: 'pv-muted pv-cited', text: `“${issue.quote}”` }) : null
+        ])))
+        : el('p', { class: 'pv-muted', text: 'No logic problems found.' })
     ]);
   }
 
@@ -799,8 +911,15 @@ export function createVerifyDock(options) {
       el('div', { class: 'pv-facts' }, [renderAnswerFacts(session, 'A'), renderAnswerFacts(session, 'B')])
     ]));
 
+    if (evaluation.logic) {
+      blocks.push(el('div', { class: 'pv-block' }, [
+        el('h4', { text: 'B. Logic Review' }),
+        el('div', { class: 'pv-facts' }, [renderLogicColumn(session, 'A'), renderLogicColumn(session, 'B')])
+      ]));
+    }
+
     blocks.push(el('div', { class: 'pv-block' }, [
-      el('h4', { text: 'B. Gemini\'s Final Decision (blind)' }),
+      el('h4', { text: `${evaluation.logic ? 'C' : 'B'}. Gemini's Final Decision (blind)` }),
       el('p', { class: 'pv-verdict', text: evaluation.verdict === 'UNCERTAIN' ? 'Uncertain'
         : evaluation.verdict === 'TIE' ? 'Tie' : `${PREFERENCE_LABELS[evaluation.verdict]} is better` }),
       el('p', { text: evaluation.reasoning }),
@@ -816,11 +935,16 @@ export function createVerifyDock(options) {
           ? `Gemini found ${wrong.length} contradicted claim(s) in your preferred Answer ${human}:`
           : `Gemini found no contradicted claims in your preferred Answer ${human}; the difference comes from the other criteria.` }));
         if (wrong.length > 0) disagreement.push(el('ul', {}, wrong.map(claim => el('li', { text: claim.statement }))));
+        const logicIssues = evaluation.logic?.[human]?.issues || [];
+        if (logicIssues.length > 0) {
+          disagreement.push(el('p', { text: `Gemini's logic review found ${logicIssues.length} issue(s) in Answer ${human}:` }),
+            el('ul', {}, logicIssues.map(issue => el('li', { text: `${LOGIC_TYPE_LABELS[issue.type] || issue.type} (${issue.severity}): ${issue.explanation}` }))));
+        }
       }
       disagreement.push(el('p', { class: 'pv-muted', text: 'See Gemini\'s reasoning and criterion scores above.' }));
     }
     blocks.push(el('div', { class: 'pv-block' }, [
-      el('h4', { text: 'C. Human vs AI' }),
+      el('h4', { text: `${evaluation.logic ? 'D' : 'C'}. Human vs AI` }),
       el('table', { class: 'pv-hva' }, el('tbody', {}, [
         el('tr', {}, [el('th', { text: 'Human Preference' }), el('td', { text: PREFERENCE_LABELS[human] })]),
         el('tr', {}, [el('th', { text: 'Gemini Preference' }), el('td', { text: PREFERENCE_LABELS[evaluation.verdict] })]),
@@ -884,6 +1008,7 @@ export function createVerifyDock(options) {
       renderGeminiSection(session)
     ]);
     root.replaceChildren(renderHeader(), body);
+    updateJudgePane();
   }
 
   // ===== Modals =====
@@ -937,6 +1062,8 @@ export function createVerifyDock(options) {
     webConsent.checked = settings.webConsentAcknowledged;
     const webTimeout = el('input', { type: 'number', min: '60', max: '900' });
     webTimeout.value = String(Math.round(settings.webTimeoutMs / 1000));
+    const template = el('textarea', { rows: '12', spellcheck: 'false', class: 'pv-template' });
+    template.value = settings.webTemplate || DEFAULT_ACCEPTANCE_TEMPLATE;
     const status = el('p', { class: 'pv-muted', role: 'status' });
 
     const field = (label, input, hint, highlight) => el('label', { class: `pv-field${highlight ? ' pv-highlight' : ''}` }, [
@@ -953,6 +1080,8 @@ export function createVerifyDock(options) {
           backend: apiBackend.checked ? 'api' : 'web',
           webConsentAcknowledged: webConsent.checked,
           webTimeoutMs: Number(webTimeout.value) * 1000,
+          // Saving the default text unchanged keeps following future defaults.
+          webTemplate: template.value.trim() === DEFAULT_ACCEPTANCE_TEMPLATE.trim() ? '' : template.value,
           model: model.value,
           autoVerify: auto.checked,
           redactModelNames: redact.checked,
@@ -989,10 +1118,16 @@ export function createVerifyDock(options) {
     };
 
     const webGroup = el('div', { class: 'pv-group' }, [
-      el('p', { class: 'pv-muted', text: 'Like the other panels: Gemini runs on gemini.google.com in a hidden panel with your Google login. No API key and no billing. Sources are what Gemini cites on the page; there is no API grounding metadata, so evidence checks are weaker than in API mode.' }),
+      el('p', { class: 'pv-muted', text: 'Like the other panels: Gemini runs on gemini.google.com with your Google login, in the verifier panel below the answers. No API key and no billing. In this mode Gemini only verifies; a Gemini panel at the top does not receive Send All. Sources are what Gemini cites on the page; there is no API grounding metadata, so evidence checks are weaker than in API mode.' }),
       el('label', { class: `pv-check${highlightConsent && webBackend.checked ? ' pv-highlight' : ''}` }, [webConsent,
         ' I understand that web mode sends the prompt and both answer texts to Gemini under my Google account. Verify turns on Gemini\'s temporary chat when it can; if it cannot, the check appears in my Gemini history.']),
-      field('Web mode timeout (seconds)', webTimeout, 'Gemini web can take a few minutes when it searches.')
+      field('Web mode timeout (seconds)', webTimeout, 'Gemini web can take a few minutes when it searches.'),
+      field('Acceptance template (what Gemini is asked to check)', template,
+        'Role, fact check, logic review and verdict rules. The reply format, the question and the two anonymous answers are added after it automatically.'),
+      el('div', { class: 'pv-row' }, [el('button', {
+        type: 'button', class: 'pv-btn',
+        onclick: () => { template.value = DEFAULT_ACCEPTANCE_TEMPLATE; }
+      }, 'Restore default template')])
     ]);
     const apiGroup = el('div', { class: 'pv-group' }, [
       el('p', { class: 'pv-muted', text: 'Uses the Gemini API with Google Search grounding: sources come from structured grounding metadata. Search grounding is not on the free tier for Gemini 3.x Flash models, so the key\'s project needs billing.' }),
@@ -1164,13 +1299,14 @@ export function createVerifyDock(options) {
     stopPolling();
     window.removeEventListener('message', handleMessage);
     runners.forEach(controller => controller.abort());
-    judgeHost?.remove();
-    judgeHost = null;
+    judgeFrame?.remove();
+    judgeFrame = null;
   }
 
   return {
     init,
     destroy,
+    isVerifierPanel,
     beforeBroadcast,
     afterBroadcast,
     captureNow,

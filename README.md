@@ -17,7 +17,7 @@
 
 Gemini 有两种工作方式，在设置里切换：
 
-- **网页模式（默认，免费）**：和 Panelize 其他面板一样，在隐藏面板里打开 gemini.google.com，用你的 Google 登录，不需要 API Key。来源是 Gemini 回答里写的链接，只有同时出现在 Gemini 页面引用中的才算已确认。
+- **网页模式（默认，免费）**：上方两个面板回答，下方的「Gemini verifier」面板用 gemini.google.com（你的 Google 登录，不需要 API Key）按**验收模板**做验收：事实核查 + 逻辑审查 + 验收结论。投票前这个面板被盖住，投票后可以直接读 Gemini 的完整报告。顶部的 Gemini 面板在这个模式下不参与回答。模板可在设置里修改。来源是 Gemini 回答里写的链接，只有同时出现在 Gemini 页面引用中的才算已确认。
 - **API 模式**：用 Gemini API 和 Google Search Grounding，来源取自结构化的搜索元数据，更严格；需要 API Key 和结算账号。
 
 ## 与 Panelize 相比的改动
@@ -26,7 +26,7 @@ Gemini 有两种工作方式，在设置里切换：
 |---|---|
 | 新增：回答抓取（只读 DOM） | `content-scripts/answer-extractor.js` |
 | 新增：会话状态、匿名化、Gemini 调用、证据映射、存储 | `modules/verify/` |
-| 新增：Verify 面板界面、网页模式的隐藏 Gemini 面板 | `multi-panel/verify-dock.js`、`multi-panel/verify-dock.css`、`multi-panel/verify-web-runner.js` |
+| 新增：Verify 面板界面、网页模式的 Gemini 验证面板与验收模板 | `multi-panel/verify-dock.js`、`multi-panel/verify-dock.css`、`multi-panel/verify-web-runner.js`、`modules/verify/acceptance-template.js` |
 | 修改：接入面板、发送前后的钩子 | `multi-panel/multi-panel.js`、`multi-panel/multi-panel.html` |
 | 修改：扩展名、Gemini API 主机权限 | `manifest.json`、`_locales/*/messages.json` |
 | 新增：测试 | `tests/verify-*.test.js`、`tests/e2e/verify-flow.e2e.test.js` |

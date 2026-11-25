@@ -23,6 +23,8 @@ export const DEFAULT_VERIFY_SETTINGS = Object.freeze({
   backend: 'web',
   webConsentAcknowledged: false,
   webTimeoutMs: 300000,
+  // Empty: use DEFAULT_ACCEPTANCE_TEMPLATE. Otherwise the user's own text.
+  webTemplate: '',
   model: 'gemini-3.5-flash-lite',
   autoVerify: true,
   consentAcknowledged: false,
@@ -51,6 +53,7 @@ export function normalizeSettings(raw) {
     backend: VERIFY_BACKENDS.includes(source.backend) ? source.backend : defaults.backend,
     webConsentAcknowledged: source.webConsentAcknowledged === true,
     webTimeoutMs: clampInt(source.webTimeoutMs, 60000, 900000, defaults.webTimeoutMs),
+    webTemplate: typeof source.webTemplate === 'string' ? source.webTemplate.slice(0, 8000) : '',
     model: typeof source.model === 'string' && /^[a-z0-9][a-z0-9.-]{0,79}$/i.test(source.model.trim())
       ? source.model.trim()
       : defaults.model,
