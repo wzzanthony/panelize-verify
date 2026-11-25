@@ -2442,6 +2442,7 @@ async function setupVerifyDock() {
   verifyDock = createVerifyDock({
     root,
     toggleButton: document.getElementById('verify-dock-btn'),
+    bar: document.getElementById('verify-bar'),
     getPanels: () => panels,
     postToPanelFrame,
     findMessageSourcePanel,

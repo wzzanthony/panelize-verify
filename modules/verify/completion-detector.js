@@ -15,6 +15,8 @@ export function normalizeForMatch(text) {
   return String(text || '')
     .normalize('NFKC')
     .replace(/\s+/g, '')
+    // Pages render the prompt's Markdown: compare the words, not the markup.
+    .replace(/[*_`#>~|\\]/g, '')
     .toLowerCase();
 }
 
@@ -30,22 +32,43 @@ export function promptMatchesUserTurn(prompt, userText) {
   return user.includes(promptKey) || promptKey.startsWith(user.slice(0, PROMPT_KEY_LENGTH));
 }
 
+/** A reply whose text has not changed this long counts as finished even
+ * while the page still shows a "stop" control (selectors can go stale). */
+export const GENERATING_STALL_MS = 20000;
+
 /**
- * @param {{ prompt?: string, baseline?: object | null, stableMs?: number }} options
+ * Fallbacks, because provider pages change without notice:
+ * - user turns not found at all: a changed latest reply counts as the new one;
+ * - prompts are compared without Markdown markup, which pages render away;
+ * - "generating" stuck on with text unchanged for GENERATING_STALL_MS: done.
+ *
+ * @param {{ prompt?: string, baseline?: object | null, stableMs?: number, stallMs?: number }} options
  */
-export function createCompletionDetector({ prompt = '', baseline = null, stableMs = DEFAULT_STABLE_MS } = {}) {
+export function createCompletionDetector({
+  prompt = '',
+  baseline = null,
+  stableMs = DEFAULT_STABLE_MS,
+  stallMs = GENERATING_STALL_MS
+} = {}) {
   let lastHash = null;
   let lastChangeAt = 0;
   /** @type {any} */
   let completed = null;
 
-  function isNewTurn(state) {
+  /** @returns {'count' | 'reply' | 'prompt' | null} how the new turn was recognised */
+  function newTurnBy(state) {
     if (!baseline || baseline.supported === false) {
-      // No baseline: rely on the prompt match alone.
-      return Boolean(prompt) && promptMatchesUserTurn(prompt, state.lastUserText);
+      return Boolean(prompt) && promptMatchesUserTurn(prompt, state.lastUserText) ? 'prompt' : null;
     }
-    return state.userTurnCount > (baseline.userTurnCount || 0)
-      || state.lastUserHash !== baseline.lastUserHash;
+    if (state.userTurnCount > (baseline.userTurnCount || 0)
+      || (state.lastUserHash && state.lastUserHash !== baseline.lastUserHash)) {
+      return 'count';
+    }
+    const replyChanged = Boolean(state.hasAnswer && state.textHash && state.textHash !== baseline.textHash);
+    if (replyChanged && (!state.lastUserText || promptMatchesUserTurn(prompt, state.lastUserText))) {
+      return 'reply';
+    }
+    return null;
   }
 
   /**
@@ -63,10 +86,11 @@ export function createCompletionDetector({ prompt = '', baseline = null, stableM
     if (state.error) {
       return { phase: 'error' };
     }
-    if (!isNewTurn(state)) {
+    const by = newTurnBy(state);
+    if (!by) {
       return { phase: 'waiting' };
     }
-    if (prompt && !promptMatchesUserTurn(prompt, state.lastUserText)) {
+    if (by !== 'reply' && prompt && !promptMatchesUserTurn(prompt, state.lastUserText)) {
       return { phase: 'mismatch' };
     }
     if (!state.hasAnswer) {
@@ -76,7 +100,7 @@ export function createCompletionDetector({ prompt = '', baseline = null, stableM
       lastHash = state.textHash;
       lastChangeAt = now;
     }
-    if (state.generating) {
+    if (state.generating && now - lastChangeAt < stallMs) {
       return { phase: 'generating', text: state.text };
     }
     if (now - lastChangeAt < stableMs) {

@@ -38,13 +38,20 @@ Verify 面板 → 右侧 ⚙ → 「How Gemini checks the answers」：
 ### 2a. 网页模式
 
 1. 先在 Chrome 里打开一次 https://gemini.google.com 并登录。
-2. 设置里保持「Web mode」，勾选「I understand that web mode sends…」，Save。
-3. 布局：**上方是两个答题面板（A、B），下方 Verify 区域左边是投票和结果，右边是「Gemini verifier」面板**。
-   勾选确认后，网页模式下 Gemini 只做验证：顶部如果还有 Gemini 面板，它**不会收到 Send All**，也不算 A/B；
-   Verify 面板里会提示，并给一个「Remove it from the top」按钮把它移掉。（没勾选确认前，Panelize 的面板行为不变。）
-4. 每次比较：verifier 面板打开一个新的 Gemini 对话（尽量开临时对话），发送验收消息。**投票前它被盖住**，
-   投票（或跳过）后揭开，可以直接读 Gemini 写的完整验收报告；Verify 面板里同时显示解析后的结构化结果。
-   盖住时有 Cancel 按钮可中止。
+2. 底部 Verify 状态栏会显示「首次使用需确认」。点 **允许 Gemini 验证**，只需一次。也可以到设置里勾选同一项。
+3. 布局：
+   - **面板网格**：显示各个 AI 的回答。只要另外开着两个面板，网格里的 Gemini 就不收 Send All，也不算 A/B。
+   - **Verify 状态栏**（网格下方一行）：
+     - 版本序号 `Build N`；
+     - A / B 抓取状态，鼠标悬停可以看抓取诊断；
+     - Gemini 验证状态；
+     - 「立即抓取」（抓取进行中才显示）、「移除网格中的 Gemini」、「打开 Verify」、设置。
+   - **Gemini 页面缩略图**（状态栏最右）：Gemini 实际在这里的 iframe 中工作。Chrome 会限速被隐藏的跨域 iframe，所以页面保持渲染，只是缩小显示，并且**投票前一直遮住**。投票后点它可以放大查看，放大不会重新加载页面。
+   - **Verify 窗口**：点「打开 Verify」会打开一个独立的浏览器小窗口，可以拖到另一块屏幕。里面依次是回答、投票，以及投票后的结果和 Gemini 验收报告全文。
+     - 它显示的就是多面板页自己的 Verify 视图：两个页面同属扩展源，可以直接共享 DOM，不复制数据，也不发送到任何地方。
+     - 关掉小窗不影响后台验证。
+     - 浏览器拦截新窗口时，改为页面内可拖动、可缩放的小窗。
+4. 每次比较都会自动验证，不需要手动点：缩略图里打开一个新的 Gemini 对话（尽量开临时对话），发送验收消息。完成后状态栏按钮闪烁，并弹出提示，但不会透露 Gemini 倾向哪个回答。
 5. 超时默认 300 秒，可在设置里改（60–900）。
 
 ### 验收模板（网页模式）
@@ -110,7 +117,7 @@ Key 的存放位置：扩展自身 origin 的 IndexedDB（`PanelizeVerifyDB`）�
 | 文件 | 作用 |
 |---|---|
 | `content-scripts/answer-extractor.js` | 只读的回答抓取。Provider Adapter（ChatGPT / Claude / Gemini）+ MessageNormalizer（DOM→Markdown：标题、列表、代码块、表格、KaTeX）。只读最后一个用户轮次之后的回复 |
-| `modules/verify/completion-detector.js` | 完成判定：用户轮次比发送前新、与 Prompt 匹配、没有停止按钮、文本 2.5 秒不变 |
+| `modules/verify/completion-detector.js` | 完成判定：用户轮次比发送前新、与 Prompt 匹配（忽略 Markdown 符号）、没有停止按钮、文本 2.5 秒不变。兜底规则：页面上找不到用户轮次时，最新回答相对发送前有变化就算新回答；「停止」按钮一直不消失但文本 20 秒没变，也算完成 |
 | `modules/verify/session-state.js` | 评估会话状态机；**人类优先**的规则全在这里（揭示门控、投票锁定、post-reveal feedback） |
 | `modules/verify/anonymizer.js` | A/B→X/Y 随机映射（`crypto.getRandomValues`）、裁决映射回 A/B、模型自称屏蔽 |
 | `modules/verify/gemini-client.js` | Gemini REST 客户端：超时、取消、重试（仅 429/5xx/网络）、错误分类、Key 脱敏 |
@@ -121,12 +128,14 @@ Key 的存放位置：扩展自身 origin 的 IndexedDB（`PanelizeVerifyDB`）�
 | `modules/verify/agreement.js` | 人机一致性判定与统计 |
 | `modules/verify/storage.js` | IndexedDB 会话与 Key、设置、JSON 导出 |
 | `modules/verify/types.js` | 规格 §6 的数据结构（JSDoc 版） |
-| `multi-panel/verify-dock.js` / `.css` | Verify 面板 UI 与流程编排 |
+| `multi-panel/verify-dock.js` / `.css` | Verify 状态栏、Verify 窗口与流程编排 |
+| `multi-panel/verify-window.html` | 独立 Verify 窗口的空壳页面：不含脚本，由多面板页把 Verify 视图放进去 |
+| `scripts/bump-verify-build.mjs` | `npm run bump:build`：把 manifest 的 `version_name` 序号加 1（状态栏显示的 `Build N`），每次更新前运行 |
 
 ### 修改的原有文件
 
 - `multi-panel/multi-panel.js`：+2 个 import、`setupVerifyDock()`、`broadcastMessage` 里发送前后各一行钩子；网页模式下 Send All / 触发发送跳过 Gemini 验证者面板。
-- `multi-panel/multi-panel.html`：工具栏 Verify 按钮、`#verify-region`（`#verify-dock` + `#verify-judge-pane`）、标题。
+- `multi-panel/multi-panel.html`：工具栏 Verify 按钮、`#verify-region`（`#verify-bar` 状态栏 + `#verify-judge-pane` 缩略图）、`#verify-dock`（Verify 窗口）、标题。
 - `content-scripts/text-injection-all-providers.js`：Claude 自动发送改为带重试与「输入框已清空」确认（见第 7 节第 16 条）。
 - `manifest.json`：ChatGPT / Claude / Gemini 的 content script 列表加 `answer-extractor.js`；host 权限只加了 `https://generativelanguage.googleapis.com/*`；`short_name`。
 - `_locales/*/messages.json`：扩展名改为 `Panelize Verify - …`。
@@ -231,6 +240,11 @@ npm run test:e2e:verify  # 真实 Chromium 加载扩展的端到端流程
 16. Claude 的 Send All：Panelize 原本只在填字 0.5 秒后点一次发送按钮，问题常停在输入框里。原因之一是它的备用选择器 `fieldset button:has(svg)` 会点中输入框左边的「+」按钮，并误以为已经发出。现在只认真正的发送按钮（aria-label 为 Send / Send message 等）；找不到带标签的按钮时，才用输入框里最后一个图标按钮，且排除附件、工具、模型等按钮。点击与在编辑器里按回车交替进行，每次之后检查输入框是否已清空，最多 5 次；只有问题还在输入框里时才会再试，所以不会重复发送。5 次都没发出去时，多面板页会弹出提示，并在控制台打印发送按钮的标签，方便排查。真实 claude.ai 上未验证。
 17. 网页模式下，只要另外两个面板开着，网格里的 Gemini 面板就当作验证方：不收 Send All，也不算 A 或 B。不再要求先到设置里勾选确认；第一次验证时，Verify 面板会就地请你确认一次。点 Send All 时 Verify 区自动展开，下方的 Gemini 验证面板随之出现。
 18. Gemini 页面里嵌套的子框架原先也会给扩展页发消息，Chrome 会报 "target origin ... does not match"。现在只有直接嵌在多面板页里的框架才会发，与上游 Panelize 2.3.x 的写法一致。
+19. 实测时出现过：两个回答都已生成完，状态却一直停在「等待」。真实网页的结构我拿不到，原因无法确定。已做的处理：
+    - 完成判定加了上面那两条兜底规则；
+    - 状态栏悬停和 Verify 窗口里会显示抓取诊断（提问轮数前后对比、是否找到回答及字数、页面是否显示仍在生成）；
+    - 抓取进行中，状态栏有「立即抓取」按钮。
+20. Verify 默认在后台验证（网页模式下每次都做），结果在独立小窗里查看（见 2a）。状态栏显示版本序号 `Build N`，每次更新加 1，方便确认装的是不是新版。
 
 ### 尚未实现
 

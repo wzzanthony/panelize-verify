@@ -71,6 +71,7 @@
  * @property {string} reasoning
  * @property {VerifiedClaim[]} claims
  * @property {{ A?: LogicReview, B?: LogicReview }} [logic] Web mode: logic review per answer.
+ * @property {string} [report] Web mode: Gemini's readable acceptance report (A / B labels).
  * @property {string} evaluatedAt
  * @property {object} [criteria]
  * @property {string[]} [warnings]

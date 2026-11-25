@@ -242,10 +242,11 @@ const flush = async () => {
   for (let i = 0; i < 10; i += 1) await new Promise(resolve => setTimeout(resolve, 0));
 };
 
-function setupDock(settings, { withGeminiPanel = false } = {}) {
-  document.body.innerHTML = '<div id="verify-region"><section id="verify-dock"></section><aside id="pane" hidden></aside></div>';
+function setupDock(settings, { withGeminiPanel = false, openWindowImpl = null } = {}) {
+  document.body.innerHTML = '<div id="verify-region"><div id="bar"></div><aside id="pane" hidden></aside></div><section id="verify-dock" hidden></section>';
   const root = document.getElementById('verify-dock');
   const judgePane = document.getElementById('pane');
+  const bar = document.getElementById('bar');
   const panels = [
     ...(withGeminiPanel ? [{ id: 'p0', providerId: 'gemini', iframe: { contentWindow: {} } }] : []),
     { id: 'p1', providerId: 'chatgpt', iframe: { contentWindow: {} } },
@@ -278,10 +279,12 @@ function setupDock(settings, { withGeminiPanel = false } = {}) {
     createWebRunner: () => ({ run: vi.fn(), getPanel: () => null }),
     createJudgeFrame: doc => doc.createElement('div'),
     judgePane,
+    bar,
     removePanels,
+    openWindow: (...args) => (openWindowImpl ? openWindowImpl(...args) : null),
     confirm: () => true
   });
-  return { dock, root, apiEvaluate, webEvaluate, judgePane, panels, removePanels };
+  return { dock, root, bar, apiEvaluate, webEvaluate, judgePane, panels, removePanels };
 }
 
 describe('Verify web mode — dock', () => {
@@ -370,7 +373,7 @@ describe('Verify web mode — Gemini as verifier panel', () => {
     await flush();
     const session = env.dock._getCurrentSession();
     expect([session.answerA.model, session.answerB.model]).toEqual(['chatgpt', 'claude']);
-    const removeButton = [...env.root.querySelectorAll('button')].find(button => button.textContent === 'Remove it from the top');
+    const removeButton = [...env.bar.querySelectorAll('button')].find(button => button.textContent === '移除网格中的 Gemini');
     removeButton.click();
     expect(env.removePanels).toHaveBeenCalledWith(['p0']);
   });
@@ -389,12 +392,93 @@ describe('Verify web mode — Gemini as verifier panel', () => {
     expect(env.judgePane.hidden).toBe(false);
     expect(env.judgePane.querySelector('.pv-judge-frame')).not.toBeNull();
     expect(env.judgePane.querySelector('.pv-judge-cover').hidden).toBe(false);
-    expect(document.getElementById('verify-region').classList.contains('pv-with-judge')).toBe(true);
+    expect(env.judgePane.querySelector('.pv-judge-peek').hidden).toBe(true);
 
     await env.dock.submitHumanVote('B');
     await flush();
     expect(env.judgePane.querySelector('.pv-judge-cover').hidden).toBe(true);
     expect(env.root.textContent).toContain('B. Logic Review');
     expect(env.root.textContent).toContain('Calculation error');
+    // The page can now be opened large, without reloading it.
+    const frame = env.judgePane.querySelector('.pv-judge-frame');
+    env.judgePane.querySelector('.pv-judge-peek').click();
+    expect(env.judgePane.classList.contains('pv-judge-open')).toBe(true);
+    expect(env.judgePane.querySelector('.pv-judge-frame')).toBe(frame);
+  });
+});
+
+describe('Verify web mode — status bar, background check and the Verify window', () => {
+  it('verifies in the background even with automatic verification off, and says so in the bar without the verdict', async () => {
+    const env = setupDock({ autoVerify: false, webConsentAcknowledged: true });
+    await env.dock.init();
+    expect(env.root.hidden).toBe(true);
+    await env.dock.captureNow();
+    await flush();
+    expect(env.webEvaluate).toHaveBeenCalledTimes(1);
+    expect(env.root.hidden).toBe(true); // nothing pops up by itself
+    expect(env.bar.textContent).toContain('A · chatgpt');
+    expect(env.bar.textContent).not.toContain('null');
+    expect(env.bar.textContent).toContain('验证完成 · 投票后查看');
+    expect(env.bar.textContent).toContain('验证完成 · 打开');
+    expect(env.bar.textContent).not.toContain('Answer B is better');
+    expect(env.bar.querySelector('.pv-attention')).not.toBeNull();
+
+    await env.dock.submitHumanVote('A');
+    await flush();
+    expect(env.bar.textContent).toContain('结果已揭晓');
+    expect(env.bar.querySelector('.pv-attention')).toBeNull();
+  });
+
+  it('asks for the one-time consent in the bar', async () => {
+    const env = setupDock({ autoVerify: true });
+    await env.dock.init();
+    await env.dock.captureNow();
+    await flush();
+    expect(env.webEvaluate).not.toHaveBeenCalled();
+    const allow = [...env.bar.querySelectorAll('button')].find(button => button.textContent === '允许 Gemini 验证');
+    allow.click();
+    await flush();
+    expect(env.webEvaluate).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows Gemini\'s readable report only after the vote', async () => {
+    const env = setupDock({ autoVerify: true, webConsentAcknowledged: true });
+    await env.dock.init();
+    await env.dock.captureNow();
+    await flush();
+    expect(env.root.textContent).not.toContain('Here is the check.');
+    await env.dock.submitHumanVote('TIE');
+    await flush();
+    expect(env.root.textContent).toContain('Gemini 验收报告');
+    expect(env.root.querySelector('.pv-report-text').textContent).toBe('Here is the check.');
+  });
+
+  it('opens the Verify view in its own window, and takes it back when that window closes', async () => {
+    const popupDoc = document.implementation.createHTMLDocument('Verify');
+    popupDoc.body.innerHTML = '<div id="pv-window-host"></div>';
+    const popup = { closed: false, document: popupDoc, focus: vi.fn(), close: vi.fn(() => { popup.closed = true; }) };
+    const openWindowImpl = vi.fn(() => popup);
+    const env = setupDock({ webConsentAcknowledged: true }, { openWindowImpl });
+    await env.dock.init();
+    [...env.bar.querySelectorAll('button')].find(button => button.textContent.includes('打开 Verify')).click();
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(openWindowImpl).toHaveBeenCalledWith(expect.stringContaining('verify-window.html'), 'panelize-verify', expect.stringContaining('popup'));
+    expect(popupDoc.getElementById('pv-window-host').contains(env.root)).toBe(true);
+    expect(env.root.hidden).toBe(false);
+
+    popup.closed = true;
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    expect(document.body.contains(env.root)).toBe(true);
+    expect(env.root.hidden).toBe(true);
+  });
+
+  it('falls back to a draggable box in the page when the browser blocks the window', async () => {
+    const env = setupDock({ webConsentAcknowledged: true }, { openWindowImpl: () => null });
+    await env.dock.init();
+    env.dock.openVerify();
+    expect(env.root.hidden).toBe(false);
+    expect(env.root.classList.contains('pv-float')).toBe(true);
+    [...env.root.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Close Verify').click();
+    expect(env.root.hidden).toBe(true);
   });
 });

@@ -83,6 +83,22 @@ export function extractJsonObject(text) {
   throw invalidOutput('(Gemini web reply contained no JSON object)');
 }
 
+export const MAX_REPORT_CHARS = 20000;
+
+/**
+ * The human-readable acceptance report: Gemini's reply up to the final JSON
+ * block, with X / Y relabelled to A / B. Shown only after the vote.
+ */
+export function extractReport(text, mapping) {
+  const source = String(text || '');
+  const fences = [...source.matchAll(/```(?:json|JSON)?[ \t]*\n[\s\S]*?```/g)];
+  let end = source.length;
+  if (fences.length > 0) end = fences[fences.length - 1].index;
+  else if (source.indexOf('{') !== -1) end = source.indexOf('{');
+  const report = source.slice(0, end).trim().slice(0, MAX_REPORT_CHARS);
+  return relabelAnonymousText(report, mapping);
+}
+
 /**
  * Normalises a URL for comparison; unwraps Google redirect links
  * (https://www.google.com/url?q=...) that citation chips may use.
@@ -271,6 +287,7 @@ export function parseWebJudgeReply(replyText, pageLinks, {
     criteria: relabelCriteria(judge.criteria, mapping),
     claims,
     ...(logic ? { logic } : {}),
+    report: extractReport(replyText, mapping),
     evaluatedAt: retrievedAt,
     warnings,
     webSearchQueries: [],

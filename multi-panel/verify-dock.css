@@ -1,6 +1,11 @@
-/* Panelize Verify dock. Sits between the panel grid and the input bar. */
+/* Panelize Verify: a slim status bar under the panels, the Verify window
+   (a separate browser window, or a draggable box in the page), and the
+   Gemini page as a covered thumbnail at the end of the bar. */
 
-#verify-dock {
+#verify-dock,
+#verify-bar,
+#verify-judge-pane,
+.pv-modal {
   --pv-bg: #ffffff;
   --pv-surface: #f7f7f8;
   --pv-border: #e0e0e0;
@@ -14,20 +19,12 @@
   --pv-unverifiable: #5f6368;
   --pv-note-bg: #fff8e1;
   --pv-error-bg: #fdecea;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  /* Reserve the header row before the script renders it, so the panels do
-     not shrink (and lose their scroll position) after they have loaded. */
-  min-height: 41px;
-  max-height: 48vh;
-  background: var(--pv-bg);
-  color: var(--pv-text);
-  border-top: 1px solid var(--pv-border);
-  font-size: 13px;
 }
 
-[data-theme="dark"] #verify-dock {
+[data-theme="dark"] #verify-dock,
+[data-theme="dark"] #verify-bar,
+[data-theme="dark"] #verify-judge-pane,
+[data-theme="dark"] .pv-modal {
   --pv-bg: #262626;
   --pv-surface: #303030;
   --pv-border: #444444;
@@ -43,6 +40,54 @@
   --pv-error-bg: #4a2523;
 }
 
+/* ----- The Verify window ----- */
+
+#verify-dock {
+  display: flex;
+  flex-direction: column;
+  background: var(--pv-bg);
+  color: var(--pv-text);
+  font-size: 13px;
+}
+
+#verify-dock[hidden] {
+  display: none;
+}
+
+/* In the page: a draggable, resizable box. */
+#verify-dock.pv-float {
+  position: fixed;
+  right: 24px;
+  bottom: 60px;
+  z-index: 1000;
+  width: min(560px, calc(100vw - 32px));
+  height: min(78vh, 860px);
+  min-width: 340px;
+  min-height: 220px;
+  border: 1px solid var(--pv-border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+  resize: both;
+}
+
+#verify-dock.pv-float .pv-header {
+  cursor: move;
+  user-select: none;
+}
+
+/* In its own browser window: fill it. */
+#verify-dock.pv-popup {
+  position: fixed;
+  inset: 0;
+}
+
+#verify-dock .pv-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  align-content: start;
+}
+
 #verify-dock.pv-collapsed .pv-body {
   display: none;
 }
@@ -50,11 +95,17 @@
 .pv-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 16px;
-  height: 40px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 8px 12px;
+  min-height: 40px;
   flex-shrink: 0;
-  overflow: hidden;
+  border-bottom: 1px solid var(--pv-border);
+  margin-bottom: 10px;
+}
+
+.pv-title {
+  font-size: 14px;
 }
 
 .pv-title-btn {
@@ -498,10 +549,15 @@
   }
 }
 
-/* The header has a fixed height; its buttons never wrap, the chips shrink. */
 .pv-header-actions {
-  flex-wrap: nowrap;
-  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* In the window the A / B chips get their own row under the buttons. */
+#verify-dock .pv-header .pv-chips {
+  order: 3;
+  flex: 1 0 100%;
+  flex-wrap: wrap;
 }
 
 .pv-chip {
@@ -537,109 +593,247 @@
   font-size: 12px;
 }
 
-/* Verify region: the dock, and in web mode the Gemini verifier beside it. */
+/* ----- Status bar under the panels ----- */
+
 #verify-region {
   flex-shrink: 0;
   display: flex;
   align-items: stretch;
-  min-height: 41px;
+  height: 44px;
 }
 
-#verify-region > #verify-dock {
+#verify-bar {
   flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  background: var(--pv-bg);
+  color: var(--pv-text);
+  border-top: 1px solid var(--pv-border);
+  font-size: 13px;
+  overflow: hidden;
 }
 
-#verify-region.pv-with-judge {
-  height: 48vh;
+.pv-bar-title {
+  font-size: 14px;
 }
 
-#verify-region.pv-with-judge > #verify-dock {
-  max-height: none;
+.pv-build {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: var(--pv-accent);
+  color: var(--pv-accent-text);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
 }
+
+.pv-bar-chips {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pv-bar-chips .pv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pv-bar-diag {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--pv-muted);
+  font-size: 11px;
+}
+
+.pv-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.pv-btn.pv-mini {
+  padding: 2px 8px;
+}
+
+.pv-gem-busy .pv-spinner {
+  display: inline-block;
+}
+
+.pv-gem-done {
+  border-color: var(--pv-supported);
+}
+
+.pv-gem-done strong,
+.pv-gem-done {
+  color: var(--pv-supported);
+}
+
+.pv-gem-failed,
+.pv-gem-failed strong {
+  color: var(--pv-contradicted);
+}
+
+.pv-gem-attention {
+  border-color: var(--pv-accent);
+}
+
+.pv-attention {
+  animation: pv-pulse 1.6s ease-in-out infinite;
+}
+
+#verify-dock-btn.pv-attention {
+  color: var(--pv-accent, #1a73e8);
+}
+
+@keyframes pv-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(26, 115, 232, 0.55); }
+  50% { box-shadow: 0 0 0 6px rgba(26, 115, 232, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pv-attention { animation: none; outline: 2px solid var(--pv-accent, #1a73e8); }
+}
+
+.pv-diag {
+  font-size: 12px;
+  margin: 2px 0;
+}
+
+/* ----- Gemini page: thumbnail at the end of the bar ----- */
 
 #verify-judge-pane {
-  --pv-bg: #ffffff;
-  --pv-text: #222222;
-  --pv-muted: #6b6b6b;
-  --pv-border: #e0e0e0;
-  --pv-accent: #1a73e8;
-  --pv-accent-text: #ffffff;
-  flex: 0 0 44%;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
+  position: relative;
+  flex: 0 0 180px;
+  overflow: hidden;
   border-top: 1px solid var(--pv-border);
   border-left: 1px solid var(--pv-border);
   background: var(--pv-bg);
   color: var(--pv-text);
-  font-size: 13px;
-}
-
-[data-theme="dark"] #verify-judge-pane {
-  --pv-bg: #262626;
-  --pv-text: #e6e6e6;
-  --pv-muted: #a0a0a0;
-  --pv-border: #444444;
-  --pv-accent: #8ab4f8;
-  --pv-accent-text: #102030;
+  font-size: 12px;
 }
 
 #verify-judge-pane[hidden] {
   display: none;
 }
 
-/* Collapsed dock while a check runs: keep the frame rendered (Chrome
-   throttles hidden cross-origin frames), as a short covered strip. */
-#verify-judge-pane.pv-judge-mini {
-  height: 120px;
-  align-self: flex-end;
-}
-
-.pv-judge-head {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 40px;
-  padding: 0 12px;
-  flex-shrink: 0;
+#verify-judge-pane .pv-judge-head {
+  display: none;
 }
 
 .pv-judge-body {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
+  position: absolute;
+  inset: 0;
   overflow: hidden;
 }
 
+/* The page keeps a desktop-sized layout and is drawn scaled down. */
 .pv-judge-frame {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  left: 0;
+  top: 0;
+  width: 1280px;
+  height: 900px;
   border: 0;
+  transform: scale(0.14);
+  transform-origin: 0 0;
+  pointer-events: none;
 }
 
 .pv-judge-cover {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 2;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 16px;
+  padding: 0 8px;
   text-align: center;
   background: var(--pv-bg);
 }
 
-.pv-judge-cover[hidden] {
+.pv-judge-cover[hidden],
+.pv-judge-peek[hidden] {
   display: none;
 }
 
-.pv-judge-cover p {
-  margin: 0;
+.pv-judge-peek {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: 0;
+  background: transparent;
+  color: transparent;
+  font-size: 12px;
+  cursor: zoom-in;
+}
+
+.pv-judge-peek:hover,
+.pv-judge-peek:focus-visible {
+  background: rgba(0, 0, 0, 0.5);
+  color: #ffffff;
+}
+
+/* Opened: a large box over the page. Only CSS changes, so no reload. */
+#verify-judge-pane.pv-judge-open {
+  position: fixed;
+  right: 16px;
+  bottom: 56px;
+  z-index: 1001;
+  width: min(760px, calc(100vw - 32px));
+  height: 75vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--pv-border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+
+#verify-judge-pane.pv-judge-open .pv-judge-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 8px 0 12px;
+  flex-shrink: 0;
+}
+
+#verify-judge-pane.pv-judge-open .pv-judge-head .pv-btn {
+  margin-left: auto;
+}
+
+#verify-judge-pane.pv-judge-open .pv-judge-body {
+  position: relative;
+  inset: auto;
+  flex: 1 1 auto;
+}
+
+#verify-judge-pane.pv-judge-open .pv-judge-frame {
+  width: 100%;
+  height: 100%;
+  transform: none;
+  pointer-events: auto;
+}
+
+/* Gemini's full report */
+.pv-report-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  max-height: 50vh;
+  overflow: auto;
 }
 
 /* Logic review */

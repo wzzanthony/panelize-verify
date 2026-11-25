@@ -92,11 +92,13 @@
       </div>
     </div>
 
-    <!-- Panelize Verify: human vote first, then Gemini fact check -->
+    <!-- Panelize Verify: status bar (Gemini verifies in the background);
+         the Verify window opens on request (human vote first, then results) -->
     <div id="verify-region">
-      <section id="verify-dock" class="pv-collapsed" aria-label="Verify"></section>
+      <div id="verify-bar" role="region" aria-label="Verify status"></div>
       <aside id="verify-judge-pane" aria-label="Gemini verifier" hidden></aside>
     </div>
+    <section id="verify-dock" aria-label="Verify" hidden></section>
 
     <!-- Store rating prompt (shown after enough successful sends) -->
     <div id="rating-banner" class="rating-banner" role="status" hidden>

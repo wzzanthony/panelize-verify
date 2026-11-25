@@ -5,6 +5,17 @@ import { renderVerifyChatFixture, renderGeminiWebJudgeFixture } from './fixtures
 const PROMPT = 'When was the Eiffel Tower completed?';
 const JUDGE_REASONING = 'Answer X states the correct completion year; Answer Y gives 1887, which sources contradict.';
 
+/** Opens the Verify window from the status bar; it is a separate browser window. */
+async function openVerifyWindow(page) {
+  const popupPromise = page.waitForEvent('popup');
+  await page.locator('#verify-bar').getByRole('button', { name: /打开|去投票/ }).click();
+  const win = await popupPromise;
+  await win.waitForLoadState();
+  const dock = win.locator('#verify-dock');
+  await expect(dock).toBeVisible();
+  return { win, dock };
+}
+
 function geminiResponse(text, groundingMetadata) {
   return {
     candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP', groundingMetadata }],
@@ -84,15 +95,17 @@ test('Verify: capture both answers, vote first, then reveal the blind Gemini che
     const page = await openMultiPanel(extension, { providers: ['chatgpt', 'claude'], layout: '1x2' });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    const dock = page.locator('#verify-dock');
-    await expect(dock).toBeVisible();
+    const bar = page.locator('#verify-bar');
+    await expect(bar).toBeVisible();
+    await expect(page.locator('#verify-dock')).toBeHidden();
 
     // Configure API mode, key and consent through the settings dialog.
-    await dock.getByRole('button', { name: 'Verify settings' }).click();
+    await bar.getByRole('button', { name: 'Verify settings' }).click();
     const modal = page.locator('.pv-modal');
     await modal.getByRole('radio', { name: /API mode/ }).check();
     await modal.locator('input[type="password"]').fill('AIzaE2E_TEST_KEY_000000000000000000');
     await modal.getByText('I understand that verification sends').click();
+    await expect(modal.getByRole('checkbox', { name: /Verify automatically/ })).toBeChecked();
     await modal.getByRole('button', { name: 'Save' }).click();
     await expect(modal.getByText('Saved.')).toBeVisible();
     await modal.getByRole('button', { name: 'Close' }).click();
@@ -100,16 +113,22 @@ test('Verify: capture both answers, vote first, then reveal the blind Gemini che
     await page.locator('#unified-input').fill(PROMPT);
     await page.locator('#send-all-btn').click();
 
-    // Both replies are captured after streaming ends; voting opens.
-    await expect(dock.getByRole('radio', { name: 'Answer A is better' })).toBeVisible({ timeout: 30000 });
-    await expect(dock.getByText('Results are hidden until you submit or skip your vote')).toBeVisible({ timeout: 30000 });
+    // Both replies are captured after streaming ends; Gemini runs in the
+    // background and the bar says when it is done, without its verdict.
+    await expect(bar).toContainText('验证完成 · 投票后查看', { timeout: 30000 });
     expect(geminiRequests).toHaveLength(3);
+    expect(await bar.innerText()).not.toContain('Answer A is better');
+
+    const { win, dock } = await openVerifyWindow(page);
+    await expect(dock.getByRole('radio', { name: 'Answer A is better' })).toBeVisible();
+    await expect(dock.getByText('Results are hidden until you submit or skip your vote')).toBeVisible();
 
     const beforeVote = await dock.innerText();
     expect(beforeVote).not.toContain('sources contradict');
     expect(beforeVote).not.toContain('Gemini Preference');
     expect(beforeVote).not.toMatch(/Contradicted|Supported:/);
     await page.screenshot({ path: testInfo.outputPath('1-before-vote.png') });
+    await win.screenshot({ path: testInfo.outputPath('1-window-before-vote.png') });
 
     // Captured text: only the new turn, full and normalized.
     await dock.locator('details.pv-answer summary').first().click();
@@ -136,19 +155,23 @@ test('Verify: capture both answers, vote first, then reveal the blind Gemini che
     await expect(dock.getByText('Answer A states the correct completion year; Answer B gives 1887, which sources contradict.')).toBeVisible();
     await expect(dock.locator('a[href="https://www.britannica.com/topic/Eiffel-Tower-Paris-France"]')).toHaveCount(1);
     await expect(dock.locator('iframe.pv-search-suggestions')).toHaveCount(1);
-    await page.screenshot({ path: testInfo.outputPath('2-after-vote.png'), fullPage: true });
+    await win.screenshot({ path: testInfo.outputPath('2-window-after-vote.png'), fullPage: true });
+    await expect(bar).toContainText('结果已揭晓');
 
-    // Test 8: reload restores the saved, revealed session.
+    // Test 8: reload restores the saved, revealed session (the window closes
+    // with the page and opens again from the bar).
     await page.reload();
-    await expect(page.locator('#verify-dock .pv-locked')).toContainText('Your vote: Answer B');
-    await expect(page.locator('#verify-dock .pv-agree-DISAGREE')).toHaveText('Disagree');
+    await expect(page.locator('#verify-bar')).toContainText('结果已揭晓');
+    const reopened = await openVerifyWindow(page);
+    await expect(reopened.dock.locator('.pv-locked')).toContainText('Your vote: Answer B');
+    await expect(reopened.dock.locator('.pv-agree-DISAGREE')).toHaveText('Disagree');
     expect(errors).toEqual([]);
   } finally {
     await extension.close();
   }
 });
 
-test('Verify web mode: two answer panels on top, Gemini verifies below, no API call, results after the vote', async ({}, testInfo) => {
+test('Verify web mode: answers in the panels, Gemini verifies in the background, the bar says when, results in the Verify window after the vote', async ({}, testInfo) => {
   test.setTimeout(120000);
   const extension = await launchExtension({ viewport: { width: 1400, height: 1000 } });
   const apiRequests = [];
@@ -179,31 +202,28 @@ test('Verify web mode: two answer panels on top, Gemini verifies below, no API c
     const page = await openMultiPanel(extension, { providers: ['chatgpt', 'claude', 'gemini'], layout: '1x3' });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    const dock = page.locator('#verify-dock');
+    const bar = page.locator('#verify-bar');
     const pane = page.locator('#verify-judge-pane');
 
-    // Web mode is the default: only the consent is needed, no key.
-    await dock.getByRole('button', { name: 'Verify settings' }).click();
-    const modal = page.locator('.pv-modal');
-    await expect(modal.getByRole('radio', { name: /Web mode/ })).toBeChecked();
-    await expect(modal.locator('input[type="password"]')).toBeHidden();
-    await modal.getByText('I understand that web mode sends').click();
-    await modal.getByRole('button', { name: 'Save' }).click();
-    await expect(modal.getByText('Saved.')).toBeVisible();
-    await modal.getByRole('button', { name: 'Close' }).click();
+    // Web mode is the default; the bar asks for the one-time consent. No key.
+    await expect(bar).toContainText('首次使用需确认');
+    await bar.getByRole('button', { name: '允许 Gemini 验证' }).click();
+    await expect(bar).toContainText('待命');
 
     await page.locator('#unified-input').fill(PROMPT);
     await page.locator('#send-all-btn').click();
 
-    // While Gemini works, the verifier panel below is covered.
-    await expect(pane.locator('.pv-judge-cover')).toContainText('covered until you vote', { timeout: 30000 });
+    // Gemini works in the background; its page (the thumbnail) is covered.
+    await expect(pane.locator('.pv-judge-cover')).toContainText('Gemini 验证中', { timeout: 30000 });
     await expect(pane).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('web-1-running.png') });
 
-    await expect(dock.getByText('Results are hidden until you submit or skip your vote')).toBeVisible({ timeout: 60000 });
-    await expect(pane.locator('.pv-judge-cover')).toContainText('covered until you vote or skip');
+    await expect(bar).toContainText('验证完成 · 投票后查看', { timeout: 60000 });
+    await expect(bar.getByRole('button', { name: /验证完成 · 打开/ })).toBeVisible();
+    await expect(pane.locator('.pv-judge-cover')).toContainText('投票后可看');
     await expect(pane.locator('iframe.pv-judge-frame')).toHaveCount(1);
     expect(apiRequests).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath('web-2-done-before-vote.png') });
 
     // Only the verifier got a message; the Gemini panel at the top got no prompt.
     const sent = geminiEvents.filter(event => event.type === 'sent');
@@ -214,9 +234,11 @@ test('Verify web mode: two answer panels on top, Gemini verifies below, no API c
     expect(sent[0].text).toContain('<<<BEGIN ANSWER X>>>');
     expect(sent[0].text).not.toMatch(/chatgpt|claude|openai|anthropic/i);
 
+    const { win, dock } = await openVerifyWindow(page);
     const beforeVote = await dock.innerText();
     expect(beforeVote).not.toContain('gives the correct year');
     expect(beforeVote).not.toContain('Gemini Preference');
+    await win.screenshot({ path: testInfo.outputPath('web-3-window-before-vote.png') });
 
     await dock.getByRole('radio', { name: 'Answer B is better' }).click();
     await dock.getByRole('button', { name: 'Submit Vote' }).click();
@@ -229,10 +251,14 @@ test('Verify web mode: two answer panels on top, Gemini verifies below, no API c
     await expect(dock.locator('.pv-unconfirmed')).toHaveCount(1);
     await expect(dock.getByText('B. Logic Review')).toBeVisible();
     await expect(dock.locator('.pv-logic-issues').getByText('Calculation error')).toBeVisible();
-    // After the vote the verifier panel is uncovered: Gemini's own report is readable.
-    await expect(pane.locator('.pv-judge-cover')).toBeHidden();
     await expect(dock.locator('.pv-count.pv-status-SUPPORTED').first()).toHaveText('Supported: 1');
-    await page.screenshot({ path: testInfo.outputPath('web-2-after-vote.png'), fullPage: true });
+    // Gemini's readable report, and its page, after the vote.
+    await expect(dock.getByText('Gemini 验收报告（全文）')).toBeVisible();
+    await expect(pane.locator('.pv-judge-cover')).toBeHidden();
+    await win.screenshot({ path: testInfo.outputPath('web-4-window-after-vote.png'), fullPage: true });
+    await pane.locator('.pv-judge-peek').click();
+    await expect(pane).toHaveClass(/pv-judge-open/);
+    await page.screenshot({ path: testInfo.outputPath('web-5-gemini-page-open.png') });
     expect(errors).toEqual([]);
   } finally {
     await extension.close();

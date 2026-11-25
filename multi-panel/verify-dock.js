@@ -1,5 +1,12 @@
 // Panelize Verify — the Verify dock in the Multi-Panel page.
 //
+// Layout: a slim status bar under the panels (build number, A / B capture
+// state, Gemini's state, the covered Gemini page as a thumbnail) and the
+// Verify window (answers, vote, results). The window opens on request as a
+// separate browser window the user can drag anywhere, e.g. onto a second
+// screen, or, if the browser blocks that, as a draggable box in the page.
+// Verification runs in the background and the bar says when it is done.
+//
 // Flow per prompt: capture both answers -> human vote (A / B / Tie / Skip)
 // -> reveal Gemini's fact check and blind verdict. Gemini may run in the
 // background, but nothing that hints at its A/B preference is rendered until
@@ -56,6 +63,19 @@ const PHASE_LABELS = {
   error: 'capture error',
   timeout: 'timed out',
   'no-frame': 'panel not loaded'
+};
+// Short labels for the status bar.
+const BAR_PHASE_LABELS = {
+  idle: '空闲',
+  waiting: '等待回答',
+  generating: '生成中…',
+  stabilizing: '即将完成…',
+  complete: '已抓取',
+  mismatch: '最新提问与发送的问题不一致',
+  unsupported: '不支持自动抓取',
+  error: '抓取出错',
+  timeout: '抓取超时',
+  'no-frame': '面板未响应'
 };
 const PROGRESS_LABELS = {
   opening: 'Opening a fresh Gemini chat…',
@@ -126,6 +146,9 @@ function safeLink(url, text) {
  *   createWebService?: (settings: object, runner: any) => { evaluate: Function },
  *   createWebRunner?: (getFrame: () => any, settings: object) => any,
  *   judgePane?: HTMLElement | null,
+ *   bar?: HTMLElement | null,
+ *   openWindow?: (url: string, name: string, features: string) => any,
+ *   windowUrl?: string,
  *   createJudgeFrame?: (doc: Document, load: boolean) => any,
  *   removePanels?: (panelIds: string[]) => void,
  *   showToast?: (message: string) => void,
@@ -146,11 +169,14 @@ export function createVerifyDock(options) {
     store,
     settingsStorage,
     showToast = () => {},
-    confirm = message => window.confirm(message),
+    confirm = message => (root.ownerDocument?.defaultView || window).confirm(message),
     now = () => Date.now(),
     schedule = (fn, ms) => setTimeout(fn, ms),
     cancelSchedule = handle => clearTimeout(handle),
     judgePane = null,
+    bar = null,
+    openWindow = (url, name, features) => window.open(url, name, features),
+    windowUrl = globalThis.chrome?.runtime?.getURL?.('multi-panel/verify-window.html') || 'verify-window.html',
     removePanels = null,
     createJudgeFrame = (doc, load) => {
       const iframe = doc.createElement('iframe');
@@ -184,7 +210,15 @@ export function createVerifyDock(options) {
   let pollHandle = null;
   let settings = null;
   let hasApiKey = false;
-  let expanded = false;
+  /** Where the Verify window is: 'closed', 'float' (in the page) or 'popup'. */
+  let windowMode = 'closed';
+  let popupWin = null;
+  let popupWatch = null;
+  /** The home of `root` in this page while it is not in the popup. */
+  let rootHome = null;
+  /** Something new for the user: 'answers' (vote now) or 'verified'. */
+  let attention = null;
+  let judgeOpen = false;
   let lastPrompt = '';
   let draftChoice = null;
   let draftReason = '';
@@ -297,9 +331,7 @@ export function createVerifyDock(options) {
     const pair = comparedPanels();
     if (!pair || !text?.trim()) return;
     stopPolling();
-    // Show the Verify area (and in web mode the Gemini verifier below) as
-    // soon as a comparison starts.
-    if (!expanded) setExpanded(true);
+    attention = null;
     capture = {
       prompt: text,
       startedAt: now(),
@@ -366,6 +398,7 @@ export function createVerifyDock(options) {
       const result = side.detector.update(state, now());
       side.phase = result.phase;
       if (result.text) side.text = result.text;
+      side.diag = describeState(state, await side.baseline);
     }));
     if (capture !== active) return;
     const { A, B } = active.sides;
@@ -380,6 +413,17 @@ export function createVerifyDock(options) {
     if (!(settled.includes(A.phase) && settled.includes(B.phase))) {
       schedulePoll();
     }
+  }
+
+  /** One line on what the extractor sees, to tell why a capture is stuck. */
+  function describeState(state, baseline) {
+    if (!state) return '面板没有回应抓取请求';
+    if (state.supported === false) return '该网站不支持自动抓取';
+    const turns = `提问轮数 ${baseline?.userTurnCount ?? '?'}→${state.userTurnCount ?? 0}`;
+    const reply = state.hasAnswer ? `回答 ${String(state.text || '').length} 字` : '未找到回答';
+    const busy = state.generating ? '页面显示仍在生成' : '页面显示已停止';
+    const user = state.lastUserText ? '' : ' · 未找到提问';
+    return `${turns} · ${reply} · ${busy}${user}`;
   }
 
   async function completeCapture(prompt, sideA, sideB, source) {
@@ -411,10 +455,13 @@ export function createVerifyDock(options) {
     } catch (error) {
       errorMessage = `Could not save the session locally: ${error.message}`;
     }
-    setExpanded(true);
+    attention = 'answers';
     render();
-    if (settings?.autoVerify && backendReady()) {
+    if (shouldAutoVerify() && backendReady()) {
+      showToast('两个回答已抓取，Gemini 正在后台验证。你可以先打开 Verify 投票。');
       void startVerification(session.id);
+    } else {
+      showToast('两个回答已抓取。打开 Verify 投票。');
     }
   }
 
@@ -460,6 +507,11 @@ export function createVerifyDock(options) {
     return isWebBackend() ? Boolean(settings?.webConsentAcknowledged) : Boolean(settings?.consentAcknowledged);
   }
 
+  /** Web mode always verifies (it is free); API mode only if the user chose so. */
+  function shouldAutoVerify() {
+    return isWebBackend() || Boolean(settings?.autoVerify);
+  }
+
   /** Whether a verification can start without asking the user anything. */
   function backendReady() {
     return hasConsent() && (isWebBackend() || hasApiKey);
@@ -469,7 +521,6 @@ export function createVerifyDock(options) {
     if (hasConsent()) return true;
     // Web mode asks inline, in the Gemini section (see renderGeminiSection).
     if (isWebBackend()) {
-      setExpanded(true);
       render();
       return false;
     }
@@ -504,15 +555,19 @@ export function createVerifyDock(options) {
   function buildJudgePane() {
     if (!judgePane || paneParts.body) return;
     paneParts.status = el('span', { class: 'pv-muted pv-judge-status' });
-    paneParts.coverText = el('p', { class: 'pv-judge-cover-text' });
-    paneParts.cancel = el('button', {
-      type: 'button', class: 'pv-btn',
-      onclick: () => { if (webRunSessionId) cancelVerification(webRunSessionId); }
-    }, 'Cancel');
-    paneParts.cover = el('div', { class: 'pv-judge-cover', role: 'status' }, [paneParts.coverText, paneParts.cancel]);
-    paneParts.body = el('div', { class: 'pv-judge-body' }, [paneParts.cover]);
+    paneParts.coverText = el('span', { class: 'pv-judge-cover-text' });
+    paneParts.cover = el('div', { class: 'pv-judge-cover', role: 'status' }, [paneParts.coverText]);
+    paneParts.peek = el('button', {
+      type: 'button', class: 'pv-judge-peek', title: 'Show the Gemini page',
+      onclick: () => { judgeOpen = true; updateJudgePane(); }
+    }, [el('span', { text: '查看 Gemini 页面' })]);
+    paneParts.close = el('button', {
+      type: 'button', class: 'pv-btn pv-icon-only', 'aria-label': 'Close the Gemini page',
+      onclick: () => { judgeOpen = false; updateJudgePane(); }
+    }, [icon('close')]);
+    paneParts.body = el('div', { class: 'pv-judge-body' }, [paneParts.cover, paneParts.peek]);
     judgePane.replaceChildren(
-      el('div', { class: 'pv-judge-head' }, [el('strong', { text: 'Gemini verifier' }), paneParts.status]),
+      el('div', { class: 'pv-judge-head' }, [el('strong', { text: 'Gemini 验证页面' }), paneParts.status, paneParts.close]),
       paneParts.body
     );
   }
@@ -524,26 +579,35 @@ export function createVerifyDock(options) {
     return Boolean(judged && !isVoteLocked(judged));
   }
 
+  /**
+   * The Gemini page sits at the end of the status bar as a small thumbnail
+   * (kept rendered: Chrome throttles hidden cross-origin frames), covered
+   * while a check runs or awaits the vote. Once uncovered it can be opened
+   * as a large overlay; only CSS changes, so the page never reloads.
+   */
   function updateJudgePane() {
     if (!judgePane) return;
-    const running = Boolean(webRunSessionId);
-    const visible = isWebBackend() && (expanded || running);
+    const visible = isWebBackend();
     judgePane.hidden = !visible;
-    judgePane.classList.toggle('pv-judge-mini', running && !expanded);
-    root.parentElement?.classList.toggle('pv-with-judge', visible && expanded);
     if (!visible) return;
     buildJudgePane();
-    ensureJudgeFrame();
-    const covered = judgeCovered();
+    // Gemini's page is created only for a check (the runner asks for it),
+    // never just because the multi-panel page opened.
+    if (judgedSessionId) ensureJudgeFrame();
+    const running = Boolean(webRunSessionId);
+    const covered = judgeCovered() || !judgeFrame;
+    if (covered) judgeOpen = false;
+    judgePane.classList.toggle('pv-judge-open', judgeOpen);
     paneParts.cover.hidden = !covered;
-    paneParts.cancel.hidden = !running;
+    paneParts.peek.hidden = covered || judgeOpen;
+    paneParts.close.hidden = !judgeOpen;
     const failed = sessions.get(judgedSessionId)?.verification?.status === 'error';
-    paneParts.coverText.textContent = running
-      ? `${PROGRESS_LABELS[progress.get(webRunSessionId)] || 'Gemini is checking…'} Gemini's page stays covered until you vote.`
-      : failed
-        ? 'Gemini\'s check failed (see the Verify panel). Its page stays covered until you vote or skip.'
-        : 'Gemini has finished. Its page stays covered until you vote or skip.';
+    paneParts.coverText.textContent = !judgeFrame
+      ? 'Gemini 待命 · 验证时在这里打开'
+      : running ? 'Gemini 验证中…'
+        : failed ? 'Gemini 验证失败' : judgeCovered() ? 'Gemini 已完成 · 投票后可看' : 'Gemini';
     paneParts.status.textContent = running ? ' · checking' : covered ? ' · waiting for your vote' : ' · gemini.google.com';
+    judgePane.title = covered ? 'Gemini 的页面在你投票前保持遮挡' : '';
   }
 
   function getWebRunner() {
@@ -570,7 +634,7 @@ export function createVerifyDock(options) {
     if (web) {
       webRunSessionId = sessionId;
       judgedSessionId = sessionId;
-      setExpanded(true);
+      judgeOpen = false;
       render();
     } else {
       apiKey = await store.getApiKey().catch(() => '');
@@ -595,10 +659,15 @@ export function createVerifyDock(options) {
           render();
         }
       });
-      await updateSession(sessionId, latest => markVerificationDone(latest, evaluation, { now: () => new Date(now()) }));
+      const done = await updateSession(sessionId, latest => markVerificationDone(latest, evaluation, { now: () => new Date(now()) }));
+      if (done && !isVoteLocked(done)) {
+        attention = 'verified';
+        showToast('Gemini 验证完成。打开 Verify，投票后查看结果。');
+      }
     } catch (error) {
-      await updateSession(sessionId, latest => markVerificationError(latest, error, { now: () => new Date(now()) }))
-        .catch(() => {});
+      const failed = await updateSession(sessionId, latest => markVerificationError(latest, error, { now: () => new Date(now()) }))
+        .catch(() => null);
+      if (failed && error?.code !== 'CANCELLED') showToast('Gemini 验证失败，详情见 Verify 窗口。');
     } finally {
       runners.delete(sessionId);
       progress.delete(sessionId);
@@ -623,6 +692,8 @@ export function createVerifyDock(options) {
         now: () => new Date(now())
       }));
       errorMessage = '';
+      attention = null;
+      render();
     } catch (error) {
       errorMessage = `Vote not saved: ${error.message}`;
       render();
@@ -645,12 +716,159 @@ export function createVerifyDock(options) {
 
   // ===== Rendering =====
 
+  // ----- Verify window: a separate browser window, or a box in the page -----
+
+  function isWindowOpen() {
+    return windowMode !== 'closed';
+  }
+
+  function syncToolbar() {
+    toggleButton?.classList.toggle('active', isWindowOpen());
+    toggleButton?.setAttribute('aria-pressed', String(isWindowOpen()));
+    toggleButton?.classList.toggle('pv-attention', Boolean(attention));
+  }
+
+  /** In-page fallback: a draggable, resizable box. */
+  function showFloat() {
+    if (rootHome && root.parentElement !== rootHome) rootHome.append(root);
+    windowMode = 'float';
+    root.classList.remove('pv-popup');
+    root.classList.add('pv-float');
+    root.hidden = false;
+    attention = null;
+    render();
+  }
+
+  /**
+   * Opens the Verify window as its own browser window (drag it to another
+   * screen). It shows this page's own Verify view: same-origin extension
+   * pages can share DOM, so nothing is copied or sent anywhere.
+   */
+  function openVerify() {
+    if (windowMode === 'popup' && popupWin && !popupWin.closed) {
+      popupWin.focus?.();
+      return;
+    }
+    let win = null;
+    try {
+      win = openWindow(windowUrl, 'panelize-verify', 'popup=yes,width=560,height=860');
+    } catch {
+      win = null;
+    }
+    if (!win) {
+      showFloat();
+      return;
+    }
+    popupWin = win;
+    windowMode = 'popup';
+    attention = null;
+    root.classList.remove('pv-float');
+    waitForPopup(win, 0);
+    render();
+  }
+
+  function waitForPopup(win, tries) {
+    if (popupWin !== win || destroyed) return;
+    let host = null;
+    try {
+      const doc = win.closed ? null : win.document;
+      // The window starts on about:blank; wait for our page's host element.
+      host = doc && doc.readyState !== 'loading' ? doc.getElementById('pv-window-host') : null;
+    } catch {
+      host = null;
+    }
+    if (host) {
+      mountInPopup(win, host);
+      return;
+    }
+    if (win.closed || tries >= 100) {
+      popupClosed();
+      if (!win.closed) {
+        try { win.close(); } catch { /* ignore */ }
+        showFloat();
+      }
+      return;
+    }
+    schedule(() => waitForPopup(win, tries + 1), 100);
+  }
+
+  function mountInPopup(win, host) {
+    const theme = document.documentElement.getAttribute('data-theme');
+    if (theme) host.ownerDocument.documentElement.setAttribute('data-theme', theme);
+    host.append(root);
+    root.classList.add('pv-popup');
+    root.hidden = false;
+    const check = () => {
+      if (popupWin !== win) return;
+      if (win.closed) {
+        popupClosed();
+        return;
+      }
+      popupWatch = schedule(check, 1000);
+    };
+    popupWatch = schedule(check, 1000);
+    render();
+    win.focus?.();
+  }
+
+  function popupClosed() {
+    if (popupWatch !== null) {
+      cancelSchedule(popupWatch);
+      popupWatch = null;
+    }
+    popupWin = null;
+    root.classList.remove('pv-popup');
+    if (rootHome) rootHome.append(root);
+    root.hidden = true;
+    windowMode = 'closed';
+    render();
+  }
+
+  function closeVerify() {
+    if (windowMode === 'popup') {
+      const win = popupWin;
+      popupClosed();
+      try { win?.close(); } catch { /* ignore */ }
+      return;
+    }
+    windowMode = 'closed';
+    root.classList.remove('pv-float');
+    root.hidden = true;
+    render();
+  }
+
+  /** Kept for callers and tests: true shows the in-page window, false closes it. */
   function setExpanded(value) {
-    expanded = value;
-    root.classList.toggle('pv-collapsed', !expanded);
-    toggleButton?.classList.toggle('active', expanded);
-    toggleButton?.setAttribute('aria-pressed', String(expanded));
-    updateJudgePane();
+    if (value) {
+      if (!isWindowOpen()) showFloat();
+    } else {
+      closeVerify();
+    }
+  }
+
+  function startDrag(event) {
+    if (windowMode !== 'float' || event.button !== 0) return;
+    if (event.target?.closest?.('button, a, input, select, textarea')) return;
+    const rect = root.getBoundingClientRect();
+    const dx = event.clientX - rect.left;
+    const dy = event.clientY - rect.top;
+    const doc = root.ownerDocument || document;
+    const view = doc.defaultView || window;
+    const move = moveEvent => {
+      const left = Math.min(Math.max(0, moveEvent.clientX - dx), Math.max(0, view.innerWidth - 120));
+      const top = Math.min(Math.max(0, moveEvent.clientY - dy), Math.max(0, view.innerHeight - 40));
+      root.style.left = `${left}px`;
+      root.style.top = `${top}px`;
+      root.style.right = 'auto';
+      root.style.bottom = 'auto';
+    };
+    const up = () => {
+      doc.removeEventListener('pointermove', move);
+      doc.removeEventListener('pointerup', up);
+    };
+    doc.addEventListener('pointermove', move);
+    doc.addEventListener('pointerup', up);
+    event.preventDefault();
   }
 
   function sideStatus(label) {
@@ -683,19 +901,24 @@ export function createVerifyDock(options) {
     }
   }
 
+  /** "Build 4" from version_name "2.2.4-verify.4": bumped on every update. */
+  function buildBadge() {
+    const label = buildLabel();
+    if (!label) return null;
+    const match = /verify\.(\d+)/.exec(label);
+    return el('span', { class: 'pv-build', title: `Installed Panelize Verify ${label}`, text: match ? `Build ${match[1]}` : label });
+  }
+
   function renderHeader() {
     const chips = ['A', 'B'].map(label => {
       const { name, phase } = sideStatus(label);
-      return el('span', { class: `pv-chip pv-phase-${phase}` }, [
+      return el('span', { class: `pv-chip pv-phase-${phase}`, title: capture?.sides?.[label]?.diag || '' }, [
         el('strong', { text: `${label} · ${name}` }), ` ${PHASE_LABELS[phase] || phase}`
       ]);
     });
-    return el('div', { class: 'pv-header' }, [
-      el('button', {
-        class: 'pv-title-btn', type: 'button', 'aria-expanded': String(expanded),
-        onclick: () => setExpanded(!expanded)
-      }, [icon(expanded ? 'expand_more' : 'expand_less'), el('span', { text: 'Verify' })]),
-      buildLabel() ? el('span', { class: 'pv-muted pv-build', title: 'Installed Panelize Verify build', text: buildLabel() }) : null,
+    return el('div', { class: 'pv-header', onpointerdown: startDrag }, [
+      el('strong', { class: 'pv-title', text: 'Verify' }),
+      buildBadge(),
       el('div', { class: 'pv-chips' }, chips),
       el('div', { class: 'pv-header-actions' }, [
         el('button', { class: 'pv-btn', type: 'button', title: 'Read both panels now', onclick: () => void captureNow() },
@@ -705,9 +928,94 @@ export function createVerifyDock(options) {
         el('button', { class: 'pv-btn', type: 'button', title: 'Saved evaluations', onclick: () => void openHistory() },
           [icon('schedule'), 'History']),
         el('button', { class: 'pv-btn pv-icon-only', type: 'button', title: 'Verify settings', 'aria-label': 'Verify settings', onclick: () => openSettings() },
-          [icon('settings')])
+          [icon('settings')]),
+        windowMode === 'float'
+          ? el('button', { class: 'pv-btn pv-icon-only', type: 'button', title: 'Open as a separate window (you can drag it to another screen)', 'aria-label': 'Open as a separate window', onclick: () => openVerify() },
+            [icon('open_in_new')])
+          : null,
+        el('button', { class: 'pv-btn pv-icon-only', type: 'button', title: 'Close', 'aria-label': 'Close Verify', onclick: () => closeVerify() },
+          [icon('close')])
       ])
     ]);
+  }
+
+  function renderGeminiChip() {
+    const session = getCurrent();
+    let text = '待命';
+    let state = 'idle';
+    let action = null;
+    const status = session?.verification?.status;
+    if (!isWebBackend() && !hasApiKey) {
+      text = 'API 模式未设置 Key';
+      action = el('button', { type: 'button', class: 'pv-btn pv-mini', onclick: () => openSettings({ highlightKey: true }) }, '设置');
+    } else if (isWebBackend() && !hasConsent()) {
+      text = '首次使用需确认';
+      state = 'attention';
+      action = el('button', {
+        type: 'button', class: 'pv-btn pv-primary pv-mini',
+        title: '把问题和两个匿名回答发到你登录的 gemini.google.com 做验证（只需确认一次）',
+        onclick: () => void grantWebConsent(session && status !== 'done' ? session.id : null)
+      }, '允许 Gemini 验证');
+    } else if (session && (runners.has(session.id) || status === 'running')) {
+      text = '验证中…';
+      state = 'busy';
+    } else if (status === 'done') {
+      text = isVoteLocked(session) ? '✓ 结果已揭晓' : '✓ 验证完成 · 投票后查看';
+      state = 'done';
+    } else if (status === 'error') {
+      text = '验证失败';
+      state = 'failed';
+      action = el('button', { type: 'button', class: 'pv-btn pv-mini', onclick: () => void startVerification(session.id) }, '重试');
+    } else if (capture?.sent) {
+      text = '等待两个回答';
+    } else if (session) {
+      text = '未验证';
+      action = el('button', { type: 'button', class: 'pv-btn pv-mini', onclick: () => void startVerification(session.id) }, '开始验证');
+    }
+    return el('span', { class: `pv-chip pv-gem pv-gem-${state}` }, [
+      state === 'busy' ? el('span', { class: 'pv-spinner', 'aria-hidden': 'true' }) : null,
+      el('strong', { text: 'Gemini' }), ` ${text}`, action ? ' ' : null, action
+    ]);
+  }
+
+  /** The slim status bar under the panels. */
+  function renderBar() {
+    if (!bar) return;
+    const sides = ['A', 'B'].map(label => {
+      const { name, phase } = sideStatus(label);
+      const diag = capture?.sides?.[label]?.diag;
+      return el('span', { class: `pv-chip pv-phase-${phase}`, title: diag ? `${name}: ${diag}` : name }, [
+        el('strong', { text: `${label} · ${name}` }), ` ${BAR_PHASE_LABELS[phase] || phase}`
+      ]);
+    });
+    const capturing = Boolean(capture?.sent) && Object.values(capture.sides).some(side => side.phase !== 'complete');
+    const verifierPanels = getPanels().filter(isVerifierPanel);
+    const openLabel = attention === 'verified' ? '验证完成 · 打开' : attention === 'answers' ? '去投票' : '打开 Verify';
+    bar.replaceChildren(...[
+      el('strong', { class: 'pv-bar-title', text: 'Verify' }),
+      buildBadge(),
+      el('div', { class: 'pv-bar-chips' }, [...sides, renderGeminiChip()]),
+      capturing ? el('span', { class: 'pv-bar-diag', text: ['A', 'B'].map(label => capture.sides[label].diag ? `${label}: ${capture.sides[label].diag}` : '').filter(Boolean).join('  |  ') }) : null,
+      el('div', { class: 'pv-bar-actions' }, [
+        capturing ? el('button', {
+          type: 'button', class: 'pv-btn pv-mini',
+          title: '两个回答都已生成完，但这里没有变化？点此直接读取两个面板',
+          onclick: () => void captureNow()
+        }, [icon('download'), '立即抓取']) : null,
+        verifierPanels.length > 0 && removePanels ? el('button', {
+          type: 'button', class: 'pv-btn pv-mini',
+          title: '网格里的 Gemini 不参与回答，验证在后台进行',
+          onclick: () => removePanels(verifierPanels.map(panel => panel.id))
+        }, '移除网格中的 Gemini') : null,
+        el('button', {
+          type: 'button', class: `pv-btn pv-primary${attention ? ' pv-attention' : ''}`,
+          title: '在单独的窗口中打开 Verify（可拖到分屏）',
+          onclick: () => openVerify()
+        }, [icon('open_in_new'), openLabel]),
+        el('button', { class: 'pv-btn pv-icon-only', type: 'button', title: 'Verify settings', 'aria-label': 'Verify settings', onclick: () => openSettings() },
+          [icon('settings')])
+      ])
+    ].filter(Boolean));
   }
 
   function renderAnswersSection(session) {
@@ -718,13 +1026,7 @@ export function createVerifyDock(options) {
     else if (answerPanels().length > 2) notes.push('More than two answer panels are open: the first two are compared as A and B.');
     const extra = [];
     if (verifierPanels.length > 0) {
-      extra.push(el('p', { class: 'pv-note' }, [
-        'In web mode Gemini only verifies (in the panel on the right). The Gemini panel above does not receive Send All. ',
-        removePanels ? el('button', {
-          type: 'button', class: 'pv-btn',
-          onclick: () => removePanels(verifierPanels.map(panel => panel.id))
-        }, 'Remove it from the top') : null
-      ]));
+      extra.push(el('p', { class: 'pv-muted', text: 'The Gemini panel in the grid only verifies (in the background); it does not receive Send All. Remove it with the button in the Verify bar.' }));
     }
     if (!session) {
       return el('section', { class: 'pv-section pv-answers' }, [
@@ -732,6 +1034,11 @@ export function createVerifyDock(options) {
         el('p', { class: 'pv-muted', text: capture?.sent
           ? 'Waiting for both replies to finish…'
           : 'Send a prompt with "Send All". Both replies are captured when they finish.' }),
+        ...(capture?.sent ? ['A', 'B'].map(label => {
+          const side = capture.sides[label];
+          return el('p', { class: 'pv-muted pv-diag', text: `${label} · ${getProviderName(side.providerId)}: ${PHASE_LABELS[side.phase] || side.phase}${side.diag ? ` — ${side.diag}` : ''}` });
+        }) : []),
+        capture?.sent ? el('p', { class: 'pv-muted', text: 'If both replies are finished but this does not change, use "Capture now".' }) : null,
         ...notes.map(note => el('p', { class: 'pv-note', text: note })),
         ...extra
       ]);
@@ -971,6 +1278,13 @@ export function createVerifyDock(options) {
       el('p', { class: 'pv-muted', text: `Gemini saw the answers as anonymous "X"/"Y" (A was ${session.anonymization.X === 'A' ? 'X' : 'Y'}), without model names or your vote.` })
     ]));
 
+    if (evaluation.report) {
+      blocks.push(el('details', { class: 'pv-block pv-report' }, [
+        el('summary', { text: 'Gemini 验收报告（全文）' }),
+        el('pre', { class: 'pv-report-text', text: evaluation.report })
+      ]));
+    }
+
     const disagreement = [];
     if (agreement === 'DISAGREE' || agreement === 'PARTIAL') {
       if (human === 'A' || human === 'B') {
@@ -1004,6 +1318,12 @@ export function createVerifyDock(options) {
     if (webEvaluation) {
       const usage = evaluation.usage || {};
       meta.push(el('p', { class: 'pv-muted', text: `Gemini web mode (your Google account, no API billing) · temporary chat ${usage.temporaryChat ? 'on' : 'off'} · ${usage.confirmedSources || 0} of ${usage.sources || 0} cited sources confirmed on the page · ${formatTime(evaluation.evaluatedAt)}` }));
+      if (judgePane && judgedSessionId === session.id) {
+        meta.push(el('button', {
+          type: 'button', class: 'pv-btn',
+          onclick: () => { judgeOpen = true; updateJudgePane(); }
+        }, '在 Gemini 页面中查看（主窗口）'));
+      }
     } else if (evaluation.usage) {
       const usage = evaluation.usage;
       meta.push(el('p', { class: 'pv-muted', text: `Model ${evaluation.model} · ${usage.calls} API calls · ${usage.searchQueries} search queries · ${usage.totalTokens} tokens · ${formatTime(evaluation.evaluatedAt)}` }));
@@ -1052,7 +1372,9 @@ export function createVerifyDock(options) {
       renderGeminiSection(session)
     ]);
     root.replaceChildren(renderHeader(), body);
+    renderBar();
     updateJudgePane();
+    syncToolbar();
   }
 
   // ===== Modals =====
@@ -1077,7 +1399,9 @@ export function createVerifyDock(options) {
       ]),
       content
     ]));
-    document.body.append(overlay);
+    // In the Verify window when it is open (it may be a separate window).
+    const host = isWindowOpen() ? root.ownerDocument || document : document;
+    host.body.append(overlay);
     /** @type {HTMLElement | null} */ (overlay.querySelector('input, textarea, select, button'))?.focus();
     return close;
   }
@@ -1162,7 +1486,7 @@ export function createVerifyDock(options) {
     };
 
     const webGroup = el('div', { class: 'pv-group' }, [
-      el('p', { class: 'pv-muted', text: 'Like the other panels: Gemini runs on gemini.google.com with your Google login, in the verifier panel below the answers. No API key and no billing. In this mode Gemini only verifies; a Gemini panel at the top does not receive Send All. Sources are what Gemini cites on the page; there is no API grounding metadata, so evidence checks are weaker than in API mode.' }),
+      el('p', { class: 'pv-muted', text: 'Like the other panels: Gemini runs on gemini.google.com with your Google login, in the background (its page is the thumbnail at the right of the Verify bar). No API key and no billing. Every comparison is verified automatically, and the bar tells you when it is done. In this mode Gemini only verifies; a Gemini panel in the grid does not receive Send All. Sources are what Gemini cites on the page; there is no API grounding metadata, so evidence checks are weaker than in API mode.' }),
       el('label', { class: `pv-check${highlightConsent && webBackend.checked ? ' pv-highlight' : ''}` }, [webConsent,
         ' I understand that web mode sends the prompt and both answer texts to Gemini under my Google account. Verify turns on Gemini\'s temporary chat when it can; if it cannot, the check appears in my Gemini history.']),
       field('Web mode timeout (seconds)', webTimeout, 'Gemini web can take a few minutes when it searches.'),
@@ -1181,6 +1505,7 @@ export function createVerifyDock(options) {
       el('label', { class: `pv-check${highlightConsent && apiBackend.checked ? ' pv-highlight' : ''}` }, [consent,
         ' I understand that verification sends the prompt and both answer texts (nothing else) to the Google Gemini API, where Google may keep them for up to 30 days for grounding.']),
       field('Request timeout (seconds)', timeout),
+      el('label', { class: 'pv-check' }, [auto, ' Verify automatically when both answers are captured (each check makes paid API calls)']),
       el('div', { class: 'pv-row' }, [
         el('button', { type: 'button', class: 'pv-btn', onclick: () => void test() }, 'Test key & model'),
         hasApiKey ? el('button', { type: 'button', class: 'pv-btn', onclick: () => void removeKey() }, 'Remove key') : null
@@ -1202,7 +1527,6 @@ export function createVerifyDock(options) {
       ]),
       webGroup,
       apiGroup,
-      el('label', { class: 'pv-check' }, [auto, ' Verify automatically when both answers are captured']),
       el('label', { class: 'pv-check' }, [redact, ' Redact the compared models\' names from answers before sending (keeps the judge blind)']),
       field('Max claims per answer', maxClaims, 'In API mode this also limits search cost: Google bills each search query the model runs.'),
       field('Max characters per answer', maxChars),
@@ -1289,7 +1613,6 @@ export function createVerifyDock(options) {
             draftChoice = null;
             draftReason = '';
             close?.();
-            setExpanded(true);
             render();
           }
         }, 'Open'))
@@ -1331,7 +1654,10 @@ export function createVerifyDock(options) {
 
   async function init() {
     window.addEventListener('message', handleMessage);
-    toggleButton?.addEventListener('click', () => setExpanded(!expanded));
+    window.addEventListener('pagehide', closePopupOnLeave);
+    rootHome = root.parentElement;
+    root.hidden = true;
+    toggleButton?.addEventListener('click', () => (isWindowOpen() ? closeVerify() : openVerify()));
     settings = await loadVerifySettings(settingsStorage).catch(() => null)
       || await loadVerifySettings(null);
     hasApiKey = Boolean(await store.getApiKey().catch(() => ''));
@@ -1342,14 +1668,20 @@ export function createVerifyDock(options) {
     } catch (error) {
       errorMessage = `Saved evaluations could not be loaded: ${error.message}`;
     }
-    setExpanded(Boolean(getCurrent() && !isVoteLocked(getCurrent())));
     render();
+  }
+
+  function closePopupOnLeave() {
+    try { popupWin?.close(); } catch { /* ignore */ }
   }
 
   function destroy() {
     destroyed = true;
     stopPolling();
+    if (popupWatch !== null) cancelSchedule(popupWatch);
+    closePopupOnLeave();
     window.removeEventListener('message', handleMessage);
+    window.removeEventListener('pagehide', closePopupOnLeave);
     runners.forEach(controller => controller.abort());
     judgeFrame?.remove();
     judgeFrame = null;
@@ -1359,6 +1691,8 @@ export function createVerifyDock(options) {
     init,
     destroy,
     isVerifierPanel,
+    openVerify,
+    closeVerify,
     beforeBroadcast,
     afterBroadcast,
     captureNow,

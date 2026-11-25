@@ -203,3 +203,35 @@ describe('settings and export', () => {
       .sessions[0].geminiEvaluation.groundingMetadata).toEqual({ big: true });
   });
 });
+
+describe('completion detector fallbacks (real pages drift)', () => {
+  const prompt = 'When was the **Eiffel Tower** finished?';
+  const reply = (extra = {}) => ({
+    supported: true, generating: false, hasAnswer: true,
+    userTurnCount: 0, lastUserText: '', lastUserHash: undefined,
+    text: 'In 1889.', textHash: 'new', ...extra
+  });
+
+  it('accepts a changed reply when the page shows no user turns at all', () => {
+    const baseline = { supported: true, userTurnCount: 0, hasAnswer: true, textHash: 'old' };
+    const detector = createCompletionDetector({ prompt, baseline, stableMs: 1000 });
+    expect(detector.update(reply({ textHash: 'old' }), 0).phase).toBe('waiting');
+    expect(detector.update(reply(), 100).phase).toBe('stabilizing');
+    expect(detector.update(reply(), 1200).phase).toBe('complete');
+  });
+
+  it('matches a prompt the page rendered without its Markdown', () => {
+    const baseline = { supported: true, userTurnCount: 1, lastUserHash: 'old' };
+    const detector = createCompletionDetector({ prompt, baseline, stableMs: 0 });
+    expect(detector.update(reply({ userTurnCount: 2, lastUserText: 'When was the Eiffel Tower finished?' }), 0).phase).toBe('complete');
+  });
+
+  it('finishes when "generating" stays on but the text stopped changing', () => {
+    const baseline = { supported: true, userTurnCount: 1, lastUserHash: 'old' };
+    const detector = createCompletionDetector({ prompt, baseline, stableMs: 1000, stallMs: 5000 });
+    const stuck = reply({ userTurnCount: 2, lastUserText: prompt, generating: true });
+    expect(detector.update(stuck, 0).phase).toBe('generating');
+    expect(detector.update(stuck, 4000).phase).toBe('generating');
+    expect(detector.update(stuck, 5100).phase).toBe('complete');
+  });
+});

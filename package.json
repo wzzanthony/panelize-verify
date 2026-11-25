@@ -24,7 +24,8 @@
     "test:live:login": "node tests/live/login.js",
     "typecheck": "tsc -p tsconfig.verify.json",
     "test:verify": "vitest run tests/verify-*.test.js",
-    "test:e2e:verify": "playwright test tests/e2e/verify-flow.e2e.test.js"
+    "test:e2e:verify": "playwright test tests/e2e/verify-flow.e2e.test.js",
+    "bump:build": "node scripts/bump-verify-build.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
