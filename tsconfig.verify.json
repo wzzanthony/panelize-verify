@@ -12,5 +12,5 @@
     "types": [],
     "skipLibCheck": true
   },
-  "include": ["modules/verify/**/*.js", "multi-panel/verify-dock.js"]
+  "include": ["modules/verify/**/*.js", "multi-panel/verify-dock.js", "multi-panel/verify-web-runner.js"]
 }

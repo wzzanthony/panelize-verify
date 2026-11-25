@@ -20,6 +20,8 @@ import { createCompletionDetector, promptMatchesUserTurn } from '../modules/veri
 import { compareJudgements, AGREEMENT_LABELS, computeAgreementStats } from '../modules/verify/agreement.js';
 import { createGeminiClient } from '../modules/verify/gemini-client.js';
 import { createGeminiVerificationService } from '../modules/verify/verification-service.js';
+import { createWebVerificationService } from '../modules/verify/web-judge.js';
+import { createWebJudgeRunner } from './verify-web-runner.js';
 import {
   loadVerifySettings,
   saveVerifySettings,
@@ -55,6 +57,10 @@ const PHASE_LABELS = {
   'no-frame': 'panel not loaded'
 };
 const PROGRESS_LABELS = {
+  opening: 'Opening Gemini in a hidden panel…',
+  sending: 'Sending the check to Gemini…',
+  waiting: 'Gemini is searching and checking claims…',
+  parsing: 'Reading Gemini\'s reply…',
   extracting: 'Extracting factual claims…',
   verifying: 'Searching Google and checking claims…',
   judging: 'Comparing the anonymous answers…'
@@ -116,6 +122,8 @@ function safeLink(url, text) {
  *   store: ReturnType<typeof import('../modules/verify/storage.js').createMemoryStore>,
  *   settingsStorage?: any,
  *   createService?: (settings: object, apiKey: string) => { evaluate: Function },
+ *   createWebService?: (settings: object, runner: any) => { evaluate: Function },
+ *   createWebRunner?: (host: HTMLElement, settings: object) => any,
  *   showToast?: (message: string) => void,
  *   confirm?: (message: string) => boolean,
  *   now?: () => number,
@@ -142,6 +150,14 @@ export function createVerifyDock(options) {
   const createService = options.createService || ((settings, apiKey) => createGeminiVerificationService({
     client: createGeminiClient({ apiKey, model: settings.model, timeoutMs: settings.timeoutMs })
   }));
+  const createWebService = options.createWebService
+    || ((_settings, runner) => createWebVerificationService({ runner }));
+  const createWebRunner = options.createWebRunner || ((host, current) => createWebJudgeRunner({
+    host,
+    postToFrame: postToPanelFrame,
+    requestState,
+    timeoutMs: current.webTimeoutMs
+  }));
 
   /** @type {Map<string, any>} */
   const sessions = new Map();
@@ -161,6 +177,10 @@ export function createVerifyDock(options) {
   let draftReason = '';
   let errorMessage = '';
   let destroyed = false;
+  /** @type {HTMLElement | null} */
+  let judgeHost = null;
+  let webRunner = null;
+  let webRunSessionId = null;
 
   // ===== Persistence =====
 
@@ -190,7 +210,7 @@ export function createVerifyDock(options) {
     if (!data || typeof data !== 'object' || data.type !== ANSWER_STATE || data.context !== 'panelize-verify') {
       return;
     }
-    const panel = findMessageSourcePanel(getPanels(), event);
+    const panel = findMessageSourcePanel(allFrames(), event);
     if (!panel || data.provider !== panel.providerId) return;
     const pending = pendingStateRequests.get(data.requestId);
     if (!pending || pending.panelId !== panel.id) return;
@@ -216,6 +236,12 @@ export function createVerifyDock(options) {
       });
       postToPanelFrame(panel, { type: EXTRACT_REQUEST, context: 'multi-panel', requestId });
     });
+  }
+
+  /** The visible panels plus the hidden Gemini judge frame while it runs. */
+  function allFrames() {
+    const judge = webRunner?.getPanel?.();
+    return judge ? [...getPanels(), judge] : getPanels();
   }
 
   function comparedPanels() {
@@ -353,7 +379,7 @@ export function createVerifyDock(options) {
     }
     setExpanded(true);
     render();
-    if (settings?.autoVerify && settings.consentAcknowledged && hasApiKey) {
+    if (settings?.autoVerify && backendReady()) {
       void startVerification(session.id);
     }
   }
@@ -392,10 +418,47 @@ export function createVerifyDock(options) {
 
   // ===== Verification =====
 
+  function isWebBackend() {
+    return settings?.backend !== 'api';
+  }
+
+  function hasConsent() {
+    return isWebBackend() ? Boolean(settings?.webConsentAcknowledged) : Boolean(settings?.consentAcknowledged);
+  }
+
+  /** Whether a verification can start without asking the user anything. */
+  function backendReady() {
+    return hasConsent() && (isWebBackend() || hasApiKey);
+  }
+
   function ensureConsent() {
-    if (settings.consentAcknowledged) return true;
+    if (hasConsent()) return true;
     openSettings({ highlightConsent: true });
     return false;
+  }
+
+  function ensureJudgeHost() {
+    if (judgeHost) return judgeHost;
+    const doc = root.ownerDocument || document;
+    judgeHost = doc.createElement('div');
+    judgeHost.className = 'pv-judge-host';
+    judgeHost.hidden = true;
+    const cover = el('div', { class: 'pv-judge-cover', role: 'status' }, [
+      el('p', {}, [el('span', { class: 'pv-spinner', 'aria-hidden': 'true' }), ' Gemini web is checking the answers']),
+      el('p', { class: 'pv-muted', text: 'Its reply stays hidden until you vote.' }),
+      el('button', {
+        type: 'button', class: 'pv-btn',
+        onclick: () => { if (webRunSessionId) cancelVerification(webRunSessionId); }
+      }, 'Cancel')
+    ]);
+    judgeHost.append(cover);
+    doc.body.append(judgeHost);
+    return judgeHost;
+  }
+
+  function getWebRunner() {
+    if (!webRunner) webRunner = createWebRunner(ensureJudgeHost(), settings);
+    return webRunner;
   }
 
   async function startVerification(sessionId, { force = false } = {}) {
@@ -404,21 +467,31 @@ export function createVerifyDock(options) {
     if (runners.has(sessionId)) return; // already running: never double-bill
     if (session.verification?.status === 'done' && !force) return;
     if (!ensureConsent()) return;
+    const web = isWebBackend();
+    if (web && webRunSessionId) {
+      showToast('Gemini web is still checking another comparison. Try again when it finishes.');
+      return;
+    }
     // Claim the slot before the first await so a second click cannot start
     // a parallel (double-billed) run.
     const controller = new AbortController();
     runners.set(sessionId, controller);
-    const apiKey = await store.getApiKey().catch(() => '');
-    if (!apiKey) {
-      runners.delete(sessionId);
-      hasApiKey = false;
-      openSettings({ highlightKey: true });
-      return;
+    let apiKey = '';
+    if (web) {
+      webRunSessionId = sessionId;
+    } else {
+      apiKey = await store.getApiKey().catch(() => '');
+      if (!apiKey) {
+        runners.delete(sessionId);
+        hasApiKey = false;
+        openSettings({ highlightKey: true });
+        return;
+      }
     }
-    progress.set(sessionId, 'extracting');
+    progress.set(sessionId, web ? 'opening' : 'extracting');
     try {
       await updateSession(sessionId, latest => markVerificationRunning(latest, { now: () => new Date(now()) }));
-      const service = createService(settings, apiKey);
+      const service = web ? createWebService(settings, getWebRunner()) : createService(settings, apiKey);
       const evaluation = await service.evaluate(sessions.get(sessionId), {
         maxClaimsPerAnswer: settings.maxClaimsPerAnswer,
         maxAnswerChars: settings.maxAnswerChars,
@@ -436,6 +509,7 @@ export function createVerifyDock(options) {
     } finally {
       runners.delete(sessionId);
       progress.delete(sessionId);
+      if (webRunSessionId === sessionId) webRunSessionId = null;
       render();
     }
   }
@@ -611,10 +685,13 @@ export function createVerifyDock(options) {
     }
     const status = session.verification?.status || 'idle';
     const running = runners.has(session.id) || status === 'running';
-    if (!settings?.consentAcknowledged || !hasApiKey) {
-      section.append(el('p', { class: 'pv-note', text: !hasApiKey
-        ? 'Add your Gemini API key in Verify settings to enable verification.'
-        : 'Verification sends the prompt and both answers to the Google Gemini API. Confirm this once in Verify settings.' }));
+    if (!backendReady()) {
+      const text = isWebBackend()
+        ? 'Web mode sends the prompt and both answers to Gemini (gemini.google.com) with your Google login. Confirm this once in Verify settings.'
+        : !hasApiKey
+          ? 'Add your Gemini API key in Verify settings, or switch to web mode (no key needed).'
+          : 'Verification sends the prompt and both answers to the Google Gemini API. Confirm this once in Verify settings.';
+      section.append(el('p', { class: 'pv-note', text }));
     }
     if (running) {
       section.append(el('p', { class: 'pv-status' }, [
@@ -649,6 +726,9 @@ export function createVerifyDock(options) {
     const evidence = claim.evidence.length > 0
       ? el('ul', { class: 'pv-evidence' }, claim.evidence.map(item => el('li', {}, [
         safeLink(item.url, item.title || 'source'),
+        item.confirmed === false
+          ? el('span', { class: 'pv-unconfirmed', text: ' · unconfirmed: not among the Gemini page\'s citations' })
+          : null,
         item.publishedAt ? el('span', { class: 'pv-muted', text: ` · published ${item.publishedAt}` }) : null,
         item.citedText ? el('div', { class: 'pv-muted pv-cited', text: `Cited for: “${item.citedText}”` }) : null
       ])))
@@ -752,7 +832,11 @@ export function createVerifyDock(options) {
 
     const meta = [];
     (evaluation.warnings || []).forEach(warning => meta.push(el('p', { class: 'pv-note', text: warning })));
-    if (evaluation.usage) {
+    const webEvaluation = evaluation.backend === 'web';
+    if (webEvaluation) {
+      const usage = evaluation.usage || {};
+      meta.push(el('p', { class: 'pv-muted', text: `Gemini web mode (your Google account, no API billing) · temporary chat ${usage.temporaryChat ? 'on' : 'off'} · ${usage.confirmedSources || 0} of ${usage.sources || 0} cited sources confirmed on the page · ${formatTime(evaluation.evaluatedAt)}` }));
+    } else if (evaluation.usage) {
       const usage = evaluation.usage;
       meta.push(el('p', { class: 'pv-muted', text: `Model ${evaluation.model} · ${usage.calls} API calls · ${usage.searchQueries} search queries · ${usage.totalTokens} tokens · ${formatTime(evaluation.evaluatedAt)}` }));
     }
@@ -762,7 +846,10 @@ export function createVerifyDock(options) {
     meta.push(el('button', {
       type: 'button', class: 'pv-btn',
       onclick: () => {
-        if (confirm('Run the verification again? This makes new Gemini API and Google Search calls and may cost money.')) {
+        const question = isWebBackend()
+          ? 'Run the verification again in Gemini web mode? It sends the answers to gemini.google.com once more.'
+          : 'Run the verification again? This makes new Gemini API and Google Search calls and may cost money.';
+        if (confirm(question)) {
           void startVerification(session.id, { force: true });
         }
       }
@@ -842,6 +929,14 @@ export function createVerifyDock(options) {
     maxChars.value = String(settings.maxAnswerChars);
     const timeout = el('input', { type: 'number', min: '10', max: '300' });
     timeout.value = String(Math.round(settings.timeoutMs / 1000));
+    const webBackend = el('input', { type: 'radio', name: 'pv-backend', value: 'web' });
+    const apiBackend = el('input', { type: 'radio', name: 'pv-backend', value: 'api' });
+    webBackend.checked = settings.backend !== 'api';
+    apiBackend.checked = settings.backend === 'api';
+    const webConsent = el('input', { type: 'checkbox' });
+    webConsent.checked = settings.webConsentAcknowledged;
+    const webTimeout = el('input', { type: 'number', min: '60', max: '900' });
+    webTimeout.value = String(Math.round(settings.webTimeoutMs / 1000));
     const status = el('p', { class: 'pv-muted', role: 'status' });
 
     const field = (label, input, hint, highlight) => el('label', { class: `pv-field${highlight ? ' pv-highlight' : ''}` }, [
@@ -855,6 +950,9 @@ export function createVerifyDock(options) {
           hasApiKey = true;
         }
         settings = await saveVerifySettings({
+          backend: apiBackend.checked ? 'api' : 'web',
+          webConsentAcknowledged: webConsent.checked,
+          webTimeoutMs: Number(webTimeout.value) * 1000,
           model: model.value,
           autoVerify: auto.checked,
           redactModelNames: redact.checked,
@@ -864,6 +962,8 @@ export function createVerifyDock(options) {
           timeoutMs: Number(timeout.value) * 1000
         }, settingsStorage);
         keyInput.value = '';
+        // A new runner picks up the new timeout; never swap one mid-run.
+        if (!webRunSessionId) webRunner = null;
         status.textContent = 'Saved.';
         render();
       } catch (error) {
@@ -888,21 +988,47 @@ export function createVerifyDock(options) {
       render();
     };
 
-    openModal('Verify settings', el('div', { class: 'pv-settings' }, [
+    const webGroup = el('div', { class: 'pv-group' }, [
+      el('p', { class: 'pv-muted', text: 'Like the other panels: Gemini runs on gemini.google.com in a hidden panel with your Google login. No API key and no billing. Sources are what Gemini cites on the page; there is no API grounding metadata, so evidence checks are weaker than in API mode.' }),
+      el('label', { class: `pv-check${highlightConsent && webBackend.checked ? ' pv-highlight' : ''}` }, [webConsent,
+        ' I understand that web mode sends the prompt and both answer texts to Gemini under my Google account. Verify turns on Gemini\'s temporary chat when it can; if it cannot, the check appears in my Gemini history.']),
+      field('Web mode timeout (seconds)', webTimeout, 'Gemini web can take a few minutes when it searches.')
+    ]);
+    const apiGroup = el('div', { class: 'pv-group' }, [
+      el('p', { class: 'pv-muted', text: 'Uses the Gemini API with Google Search grounding: sources come from structured grounding metadata. Search grounding is not on the free tier for Gemini 3.x Flash models, so the key\'s project needs billing.' }),
       field('Gemini API key', keyInput, 'Stored only in this browser (extension-private IndexedDB). Never logged or exported.', highlightKey),
       field('Gemini model ID', model, 'Any model that supports Google Search grounding. Prefer stable over preview models.'),
       el('datalist', { id: 'pv-models' }, SUGGESTED_MODELS.map(id => el('option', { value: id }))),
-      el('label', { class: `pv-check${highlightConsent ? ' pv-highlight' : ''}` }, [consent,
+      el('label', { class: `pv-check${highlightConsent && apiBackend.checked ? ' pv-highlight' : ''}` }, [consent,
         ' I understand that verification sends the prompt and both answer texts (nothing else) to the Google Gemini API, where Google may keep them for up to 30 days for grounding.']),
-      el('label', { class: 'pv-check' }, [auto, ' Verify automatically when both answers are captured']),
-      el('label', { class: 'pv-check' }, [redact, ' Redact the compared models\' names from answers before sending (keeps the judge blind)']),
-      field('Max claims per answer', maxClaims, 'Limits search cost: one grounded request per comparison; Google bills each search query the model runs.'),
-      field('Max characters per answer', maxChars),
       field('Request timeout (seconds)', timeout),
       el('div', { class: 'pv-row' }, [
-        el('button', { type: 'button', class: 'pv-btn pv-primary', onclick: () => void save() }, 'Save'),
         el('button', { type: 'button', class: 'pv-btn', onclick: () => void test() }, 'Test key & model'),
         hasApiKey ? el('button', { type: 'button', class: 'pv-btn', onclick: () => void removeKey() }, 'Remove key') : null
+      ])
+    ]);
+    const syncGroups = () => {
+      webGroup.hidden = !webBackend.checked;
+      apiGroup.hidden = !apiBackend.checked;
+    };
+    webBackend.addEventListener('change', syncGroups);
+    apiBackend.addEventListener('change', syncGroups);
+    syncGroups();
+
+    openModal('Verify settings', el('div', { class: 'pv-settings' }, [
+      el('fieldset', { class: 'pv-backend' }, [
+        el('legend', { text: 'How Gemini checks the answers' }),
+        el('label', { class: 'pv-check' }, [webBackend, ' Web mode — gemini.google.com, free (default)']),
+        el('label', { class: 'pv-check' }, [apiBackend, ' API mode — Gemini API key, stricter evidence, needs billing'])
+      ]),
+      webGroup,
+      apiGroup,
+      el('label', { class: 'pv-check' }, [auto, ' Verify automatically when both answers are captured']),
+      el('label', { class: 'pv-check' }, [redact, ' Redact the compared models\' names from answers before sending (keeps the judge blind)']),
+      field('Max claims per answer', maxClaims, 'In API mode this also limits search cost: Google bills each search query the model runs.'),
+      field('Max characters per answer', maxChars),
+      el('div', { class: 'pv-row' }, [
+        el('button', { type: 'button', class: 'pv-btn pv-primary', onclick: () => void save() }, 'Save')
       ]),
       status
     ]));
@@ -1038,6 +1164,8 @@ export function createVerifyDock(options) {
     stopPolling();
     window.removeEventListener('message', handleMessage);
     runners.forEach(controller => controller.abort());
+    judgeHost?.remove();
+    judgeHost = null;
   }
 
   return {

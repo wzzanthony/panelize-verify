@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { launchExtension, openMultiPanel } from './extension-harness.js';
-import { renderVerifyChatFixture } from './fixtures/verify-chat-fixture.js';
+import { renderVerifyChatFixture, renderGeminiWebJudgeFixture } from './fixtures/verify-chat-fixture.js';
 
 const PROMPT = 'When was the Eiffel Tower completed?';
 const JUDGE_REASONING = 'Answer X states the correct completion year; Answer Y gives 1887, which sources contradict.';
@@ -87,9 +87,10 @@ test('Verify: capture both answers, vote first, then reveal the blind Gemini che
     const dock = page.locator('#verify-dock');
     await expect(dock).toBeVisible();
 
-    // Configure key and consent through the settings dialog.
+    // Configure API mode, key and consent through the settings dialog.
     await dock.getByRole('button', { name: 'Verify settings' }).click();
     const modal = page.locator('.pv-modal');
+    await modal.getByRole('radio', { name: /API mode/ }).check();
     await modal.locator('input[type="password"]').fill('AIzaE2E_TEST_KEY_000000000000000000');
     await modal.getByText('I understand that verification sends').click();
     await modal.getByRole('button', { name: 'Save' }).click();
@@ -141,6 +142,88 @@ test('Verify: capture both answers, vote first, then reveal the blind Gemini che
     await page.reload();
     await expect(page.locator('#verify-dock .pv-locked')).toContainText('Your vote: Answer B');
     await expect(page.locator('#verify-dock .pv-agree-DISAGREE')).toHaveText('Disagree');
+    expect(errors).toEqual([]);
+  } finally {
+    await extension.close();
+  }
+});
+
+test('Verify web mode: Gemini runs hidden on gemini.google.com, no API call, results after the vote', async ({}, testInfo) => {
+  test.setTimeout(120000);
+  const extension = await launchExtension({ viewport: { width: 1400, height: 1000 } });
+  const apiRequests = [];
+  const geminiEvents = [];
+  try {
+    await extension.context.exposeBinding('__recordGeminiWeb', (_source, event) => { geminiEvents.push(event); });
+    await extension.context.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html',
+      body: renderVerifyChatFixture({
+        provider: 'chatgpt',
+        chunks: ['<p>The Eiffel Tower was completed in <strong>1889</strong> for the World\'s Fair.</p>', '<p>As ChatGPT, I am confident.</p>']
+      })
+    }));
+    await extension.context.route('https://claude.ai/**', route => route.fulfill({
+      contentType: 'text/html',
+      body: renderVerifyChatFixture({ provider: 'claude', chunks: ['<p>It opened in 1887.</p>'], chunkDelayMs: 500 })
+    }));
+    await extension.context.route('https://gemini.google.com/**', route => route.fulfill({
+      contentType: 'text/html',
+      body: renderGeminiWebJudgeFixture()
+    }));
+    await extension.context.route('https://generativelanguage.googleapis.com/**', route => {
+      apiRequests.push(route.request().url());
+      return route.abort();
+    });
+
+    const page = await openMultiPanel(extension, { providers: ['chatgpt', 'claude'], layout: '1x2' });
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    const dock = page.locator('#verify-dock');
+
+    // Web mode is the default: only the consent is needed, no key.
+    await dock.getByRole('button', { name: 'Verify settings' }).click();
+    const modal = page.locator('.pv-modal');
+    await expect(modal.getByRole('radio', { name: /Web mode/ })).toBeChecked();
+    await expect(modal.locator('input[type="password"]')).toBeHidden();
+    await modal.getByText('I understand that web mode sends').click();
+    await modal.getByRole('button', { name: 'Save' }).click();
+    await expect(modal.getByText('Saved.')).toBeVisible();
+    await modal.getByRole('button', { name: 'Close' }).click();
+
+    await page.locator('#unified-input').fill(PROMPT);
+    await page.locator('#send-all-btn').click();
+
+    // While Gemini works, its frame sits under an opaque cover.
+    await expect(page.locator('.pv-judge-host')).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('.pv-judge-cover')).toContainText('hidden until you vote');
+    await page.screenshot({ path: testInfo.outputPath('web-1-running.png') });
+
+    await expect(dock.getByText('Results are hidden until you submit or skip your vote')).toBeVisible({ timeout: 60000 });
+    await expect(page.locator('iframe.pv-judge-frame')).toHaveCount(0);
+    await expect(page.locator('.pv-judge-host')).toBeHidden();
+    expect(apiRequests).toEqual([]);
+
+    const sent = geminiEvents.filter(event => event.type === 'sent');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].temporaryChat).toBe(true);
+    expect(sent[0].text).toContain('<<<BEGIN ANSWER X>>>');
+    expect(sent[0].text).not.toMatch(/chatgpt|claude|openai|anthropic/i);
+
+    const beforeVote = await dock.innerText();
+    expect(beforeVote).not.toContain('gives the correct year');
+    expect(beforeVote).not.toContain('Gemini Preference');
+
+    await dock.getByRole('radio', { name: 'Answer B is better' }).click();
+    await dock.getByRole('button', { name: 'Submit Vote' }).click();
+
+    await expect(dock.locator('.pv-verdict')).toHaveText('Answer A is better');
+    await expect(dock.locator('.pv-agree-DISAGREE')).toHaveText('Disagree');
+    await expect(dock.getByText('Answer A gives the correct year; Answer B is contradicted by sources.')).toBeVisible();
+    await expect(dock.getByText(/Gemini web mode .*temporary chat on · 1 of 2 cited sources confirmed/)).toBeVisible();
+    // The contradicted claim cites a page Gemini did not show: not counted.
+    await expect(dock.locator('.pv-unconfirmed')).toHaveCount(1);
+    await expect(dock.locator('.pv-count.pv-status-SUPPORTED').first()).toHaveText('Supported: 1');
+    await page.screenshot({ path: testInfo.outputPath('web-2-after-vote.png'), fullPage: true });
     expect(errors).toEqual([]);
   } finally {
     await extension.close();

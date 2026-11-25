@@ -57,7 +57,7 @@ function setup({ store = createMemoryStore(), evaluate, settings, states } = {})
     findMessageSourcePanel: (list, event) => list.find(panel => panel.providerId === event.data.provider),
     getProviderName: id => ({ chatgpt: 'ChatGPT', claude: 'Claude' })[id] || id,
     store,
-    settingsStorage: memorySettings(settings ?? { autoVerify: true, consentAcknowledged: true }),
+    settingsStorage: memorySettings(settings ?? { backend: 'api', autoVerify: true, consentAcknowledged: true }),
     createService: () => ({ evaluate: evaluateFn }),
     confirm: () => true
   });
@@ -128,7 +128,7 @@ describe('Verify dock — Test 3: human-first voting', () => {
   it('does not send anything to Gemini without consent', async () => {
     const store = createMemoryStore();
     await store.setApiKey('AIzaKEY');
-    const { dock, evaluateFn } = setup({ store, settings: { autoVerify: true, consentAcknowledged: false } });
+    const { dock, evaluateFn } = setup({ store, settings: { backend: 'api', autoVerify: true, consentAcknowledged: false } });
     await dock.init();
     await dock.captureNow();
     await flush();
@@ -141,7 +141,7 @@ describe('Verify dock — Test 3: human-first voting', () => {
     await store.setApiKey('AIzaKEY');
     let release;
     const evaluate = vi.fn(() => new Promise(resolve => { release = () => resolve(EVALUATION); }));
-    const { dock } = setup({ store, evaluate, settings: { autoVerify: false, consentAcknowledged: true } });
+    const { dock } = setup({ store, evaluate, settings: { backend: 'api', autoVerify: false, consentAcknowledged: true } });
     await dock.init();
     await dock.captureNow();
     const id = dock._getCurrentSession().id;
@@ -216,7 +216,7 @@ describe('Verify dock — automatic capture', () => {
       lastUserText: turn === 1 ? 'old question' : 'Is the Earth round?'
     });
     const store = createMemoryStore();
-    const env = setup({ store, states: { chatgpt: state('chatgpt'), claude: state('claude') }, settings: { autoVerify: false } });
+    const env = setup({ store, states: { chatgpt: state('chatgpt'), claude: state('claude') }, settings: { backend: 'api', autoVerify: false } });
     // Drive time and polling by hand.
     const timers = [];
     const dock = createVerifyDock({

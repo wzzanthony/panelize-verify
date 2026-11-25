@@ -73,6 +73,24 @@ describe('answer extractor (Test 2: answer extraction)', () => {
     expect(state.text).toBe('Canberra.');
   });
 
+  it('lists the links the page rendered in the latest reply, not in code or older turns', () => {
+    document.body.innerHTML = `
+      <user-query>old</user-query>
+      <model-response><a href="https://old.example/">old source</a></model-response>
+      <user-query>Capital of Australia?</user-query>
+      <model-response>
+        <message-content><div class="markdown"><p>Canberra.</p>
+          <pre><code>{"url":"https://in-code.example/"}</code></pre>
+          <code><a href="https://inline-code.example/">x</a></code>
+        </div></message-content>
+        <a href="https://www.google.com/url?q=https://example.gov.au/">example.gov.au</a>
+        <a href="https://www.google.com/url?q=https://example.gov.au/">duplicate</a>
+        <a href="javascript:alert(1)">bad</a>
+      </model-response>`;
+    const state = extractor.readAnswerState('gemini');
+    expect(state.links).toEqual(['https://www.google.com/url?q=https://example.gov.au/']);
+  });
+
   it('keeps Markdown structure: headings, lists, code blocks and tables', () => {
     document.body.innerHTML = `<div id="m">
       <h2>Steps</h2>

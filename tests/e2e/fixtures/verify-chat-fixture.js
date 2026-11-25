@@ -76,3 +76,84 @@ export function renderVerifyChatFixture({ provider, chunks, chunkDelayMs = 300 }
 </body>
 </html>`;
 }
+
+/**
+ * gemini.google.com shaped page for Verify web mode: the composer and send
+ * button Panelize's content script targets, the temporary chat toggle, and a
+ * reply that streams a JSON code block plus one citation chip. The reply is
+ * built from what was sent, because the X/Y order is random. Calls the
+ * `__recordGeminiWeb` binding (if exposed) with what happened.
+ *
+ * @returns {string}
+ */
+export function renderGeminiWebJudgeFixture({ chunkDelayMs = 400 } = {}) {
+  return `<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Gemini verify fixture</title></head>
+<body>
+  <div id="temp-slot"><button type="button" aria-label="Turn on temporary chat">Temp</button></div>
+  <main id="thread"></main>
+  <div class="ql-editor" contenteditable="true"></div>
+  <button type="button" aria-label="Send message">Send</button>
+  <script>
+    const record = (event) => { try { window.__recordGeminiWeb && window.__recordGeminiWeb(event); } catch (e) {} };
+    const temp = document.querySelector('#temp-slot button');
+    temp.addEventListener('click', () => {
+      const on = temp.getAttribute('aria-label') === 'Turn off temporary chat';
+      temp.setAttribute('aria-label', on ? 'Turn on temporary chat' : 'Turn off temporary chat');
+      record({ type: 'temp-chat', on: !on });
+    });
+    const input = document.querySelector('.ql-editor');
+    const send = document.querySelector('button[aria-label="Send message"]');
+    const thread = document.getElementById('thread');
+    send.addEventListener('click', () => {
+      const text = input.innerText;
+      if (!text.trim()) return;
+      record({ type: 'sent', text, temporaryChat: temp.getAttribute('aria-label') === 'Turn off temporary chat' });
+      input.textContent = '';
+      const user = document.createElement('user-query');
+      user.textContent = text;
+      thread.append(user);
+      const xHas1889 = text.indexOf('1889') < text.indexOf('<<<BEGIN ANSWER Y>>>');
+      const right = xHas1889 ? 'X' : 'Y';
+      const wrong = xHas1889 ? 'Y' : 'X';
+      const data = {
+        claims: [
+          { id: 'C1', statement: 'The Eiffel Tower was completed in 1889.', answers: [right], verifiable: true, status: 'SUPPORTED',
+            explanation: 'The official site dates completion to March 1889.',
+            sources: [{ url: 'https://www.toureiffel.paris/en/the-monument/history', title: 'toureiffel.paris' }] },
+          { id: 'C2', statement: 'The Eiffel Tower opened in 1887.', answers: [wrong], verifiable: true, status: 'CONTRADICTED',
+            explanation: 'Construction started in 1887; it opened in 1889.',
+            sources: [{ url: 'https://www.britannica.com/topic/Eiffel-Tower-Paris-France', title: 'britannica.com' }] }
+        ],
+        verdict: right,
+        reasoning: 'Answer ' + right + ' gives the correct year; Answer ' + wrong + ' is contradicted by sources.',
+        criteria: { factualAccuracy: { X: xHas1889 ? 5 : 2, Y: xHas1889 ? 2 : 5 } }
+      };
+      const response = document.createElement('model-response');
+      response.innerHTML = '<message-content><div class="markdown"></div></message-content>';
+      thread.append(response);
+      const stop = document.createElement('button');
+      stop.setAttribute('aria-label', 'Stop response');
+      document.body.append(stop);
+      const body = response.querySelector('.markdown');
+      setTimeout(() => {
+        const pre = document.createElement('pre');
+        const code = document.createElement('code');
+        code.className = 'language-json';
+        code.textContent = JSON.stringify(data, null, 1);
+        pre.append(code);
+        body.append(pre);
+      }, ${JSON.stringify(chunkDelayMs)});
+      setTimeout(() => {
+        const chip = document.createElement('a');
+        chip.href = 'https://www.google.com/url?q=https%3A%2F%2Fwww.toureiffel.paris%2Fen%2Fthe-monument%2Fhistory&sa=D';
+        chip.textContent = 'toureiffel.paris';
+        response.append(chip);
+        stop.remove();
+      }, ${JSON.stringify(chunkDelayMs * 2)});
+    });
+  </script>
+</body>
+</html>`;
+}

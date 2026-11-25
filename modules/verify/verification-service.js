@@ -50,7 +50,7 @@ export function relabelAnonymousText(text, mapping) {
     .replace(/\b(Answers?)\s+([XY])\b/g, (_, word, label) => `${word} ${mapping[label]}`);
 }
 
-function relabelCriteria(criteria, mapping) {
+export function relabelCriteria(criteria, mapping) {
   const out = {};
   for (const [key, scores] of Object.entries(criteria || {})) {
     out[key] = { [mapping.X]: scores.X, [mapping.Y]: scores.Y };

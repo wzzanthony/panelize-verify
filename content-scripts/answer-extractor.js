@@ -21,6 +21,7 @@
   const ANSWER_STATE = 'PANELIZE_VERIFY_ANSWER_STATE';
   const REPLY_CONTEXT = 'panelize-verify';
   const MAX_ANSWER_CHARS = 200000;
+  const MAX_LINKS = 200;
   const MAX_USER_TEXT_CHARS = 2000;
 
   /**
@@ -311,6 +312,7 @@
       ? lastUser.textContent.replace(/\s+/g, ' ').trim().slice(0, MAX_USER_TEXT_CHARS)
       : '';
     const generating = Boolean(queryFirst(root, adapter.generating));
+    const links = collectLinks(assistantTurns);
 
     return {
       supported: true,
@@ -320,8 +322,34 @@
       lastUserHash: hashText(lastUserText),
       hasAnswer: text.length > 0,
       text,
-      textHash: hashText(text)
+      textHash: hashText(text),
+      links
     };
+  }
+
+  /**
+   * Links the page itself rendered in the answer (citation chips, source
+   * lists), outside code blocks. Used only to cross-check URLs a model wrote.
+   */
+  function collectLinks(turns) {
+    const seen = new Set();
+    const links = [];
+    for (const turn of turns) {
+      for (const anchor of turn.querySelectorAll('a[href]')) {
+        if (links.length >= MAX_LINKS) return links;
+        if (anchor.closest('pre, code')) continue;
+        let href = '';
+        try {
+          href = new URL(anchor.getAttribute('href'), location.href).href;
+        } catch {
+          continue;
+        }
+        if (!/^https?:/i.test(href) || href.length > 2048 || seen.has(href)) continue;
+        seen.add(href);
+        links.push(href);
+      }
+    }
+    return links;
   }
 
   // ===== Messaging =====

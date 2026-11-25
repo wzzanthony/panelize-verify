@@ -16,7 +16,13 @@ export const MAX_API_KEY_LENGTH = 512;
 
 // The model ID is configuration, not code: pick any model that supports
 // Google Search grounding. This default is a stable (non-preview) model.
+// backend 'web' drives gemini.google.com with the user's login (free, no
+// key); 'api' uses the Gemini API with Search grounding (needs billing).
+export const VERIFY_BACKENDS = Object.freeze(['web', 'api']);
 export const DEFAULT_VERIFY_SETTINGS = Object.freeze({
+  backend: 'web',
+  webConsentAcknowledged: false,
+  webTimeoutMs: 300000,
   model: 'gemini-3.5-flash-lite',
   autoVerify: true,
   consentAcknowledged: false,
@@ -42,6 +48,9 @@ export function normalizeSettings(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
   const defaults = DEFAULT_VERIFY_SETTINGS;
   return {
+    backend: VERIFY_BACKENDS.includes(source.backend) ? source.backend : defaults.backend,
+    webConsentAcknowledged: source.webConsentAcknowledged === true,
+    webTimeoutMs: clampInt(source.webTimeoutMs, 60000, 900000, defaults.webTimeoutMs),
     model: typeof source.model === 'string' && /^[a-z0-9][a-z0-9.-]{0,79}$/i.test(source.model.trim())
       ? source.model.trim()
       : defaults.model,

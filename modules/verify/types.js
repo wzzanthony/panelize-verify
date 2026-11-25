@@ -23,6 +23,8 @@
  * @property {string} [snippet] Source text; grounding does not return it, so unset.
  * @property {string} [citedText] Gemini's own sentence that this source supports.
  * @property {number} [confidence] Grounding support confidence, 0..1, if given.
+ * @property {boolean} [confirmed] Web mode only: the URL also appeared in the
+ *   Gemini page's own citation links. Unconfirmed sources never verify a claim.
  */
 
 /**
@@ -63,6 +65,7 @@
 /**
  * @typedef {object} GeminiEvaluation
  * @property {string} model
+ * @property {'api' | 'web'} [backend] How Gemini was reached; absent means 'api'.
  * @property {JudgeVerdict} verdict
  * @property {AnonymousVerdict} [anonymousVerdict] Verdict as Gemini gave it (X/Y).
  * @property {string} reasoning

@@ -508,3 +508,100 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Settings: backend switch and per-backend groups */
+.pv-backend {
+  border: 1px solid var(--pv-border);
+  border-radius: 8px;
+  padding: 6px 12px 8px;
+  margin: 0 0 10px;
+}
+
+.pv-backend legend {
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.pv-group {
+  border-left: 3px solid var(--pv-border);
+  padding-left: 10px;
+  margin-bottom: 10px;
+}
+
+.pv-group[hidden] {
+  display: none;
+}
+
+.pv-unconfirmed {
+  color: var(--pv-insufficient, #8a6d00);
+  font-size: 12px;
+}
+
+/* Web mode: the hidden Gemini panel. It must stay inside the viewport and
+   rendered (Chrome throttles off-screen cross-origin frames), so an opaque
+   cover sits on top of it instead of hiding it. */
+.pv-judge-host {
+  --pv-bg: #ffffff;
+  --pv-text: #222222;
+  --pv-muted: #6b6b6b;
+  --pv-border: #e0e0e0;
+  --pv-accent: #1a73e8;
+  --pv-accent-text: #ffffff;
+  position: fixed;
+  /* Over the panel grid, below the panel headers: never over the vote form. */
+  top: 110px;
+  right: 24px;
+  width: min(300px, calc(100vw - 48px));
+  height: 104px;
+  z-index: 9000;
+  border: 1px solid var(--pv-border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  background: var(--pv-bg);
+  color: var(--pv-text);
+  font-size: 13px;
+}
+
+[data-theme="dark"] .pv-judge-host {
+  --pv-bg: #2a2a2a;
+  --pv-text: #e6e6e6;
+  --pv-muted: #a0a0a0;
+  --pv-border: #444444;
+  --pv-accent: #8ab4f8;
+  --pv-accent-text: #102030;
+}
+
+.pv-judge-host[hidden] {
+  display: none;
+}
+
+/* Gemini gets a desktop-sized viewport (its usual layout); the small host
+   clips it, and the cover hides it. */
+.pv-judge-frame {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1024px;
+  height: 720px;
+  border: 0;
+  pointer-events: none;
+}
+
+.pv-judge-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 10px 12px;
+  text-align: center;
+  background: var(--pv-bg);
+}
+
+.pv-judge-cover p {
+  margin: 0;
+}

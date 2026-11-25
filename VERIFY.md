@@ -9,18 +9,45 @@
 
 ## 1. 安装（本地，未打包）
 
-1. Chrome 打开 `chrome://extensions`，打开右上角「开发者模式」。
-2. 点「加载已解压的扩展程序」，选择本目录（含 `manifest.json` 的那一层）。
-3. 点工具栏的 Panelize 图标（或 `Ctrl+Shift+E`）打开多面板页。
-4. 确保前两个面板是要比较的模型（默认示例：ChatGPT、Claude），并在面板里**登录**各自网站。
+完整步骤和常见报错见 [README.md 的"安装"一节](README.md#安装)。要点：
 
-需要 zip 包时：`npm ci && npm run release:package`（沿用 Panelize 的打包脚本，新增文件已自动包含）。
+1. 下载 zip 后先解压，然后在 `chrome://extensions` 打开开发者模式，点「加载已解压的扩展程序」，选**直接包含 `manifest.json` 的文件夹**。注意 Windows 解压常多套一层。
+2. 不要用「打包扩展程序」：自己打包的 `.crx` 普通 Chrome 不让装。
+3. 点工具栏的扩展图标（或 `Ctrl+Shift+E`）打开多面板页，前两个面板放要比较的模型（例如 ChatGPT、Claude）并登录。
+4. 更新时覆盖原文件夹，再点扩展卡片上的刷新按钮 ⟳。换路径或移除扩展会丢失本地历史和 Key。
 
-## 2. 配置 Gemini API Key（BYOK）
+只想要运行所需文件（不含测试和文档、体积更小）时，可以用 Panelize 原有的打包脚本：`npm ci && npm run release:package`。生成的 `dist/release-<版本>/panelize-<版本>-release.zip` 里没有外层文件夹，要解压到一个新建的空文件夹，再用「加载已解压的扩展程序」选这个文件夹。
+
+---
+
+## 2. 选择 Gemini 的工作方式（设置里切换）
+
+Verify 面板 → 右侧 ⚙ → 「How Gemini checks the answers」：
+
+| | 网页模式（默认） | API 模式 |
+|---|---|---|
+| 怎么调用 | 在隐藏面板里打开 gemini.google.com，用你的 Google 登录，和 Panelize 其他面板一样 | Gemini API + Google Search Grounding |
+| 需要什么 | 在这个浏览器里登录过 Gemini | API Key，且 Key 所在项目绑定结算账号 |
+| 费用 | 不计费 | 每月 5000 次搜索免费，之后按次计费 |
+| 来源可靠性 | 较弱：来源是 Gemini 在回答里写的链接，只有同时出现在 Gemini 页面引用里的才算数 | 较强：来源来自结构化的 groundingMetadata |
+| 对话记录 | 尽量开启 Gemini 临时对话；开不了会进你的 Gemini 历史（界面会提示） | Google 保留最多 30 天 |
+| 用量显示 | 无 token/搜索次数 | 调用次数、搜索次数、token |
+
+两种模式各有一个数据发送确认，**不勾选对应确认就不会发送任何内容**。
+
+### 2a. 网页模式
+
+1. 先在 Chrome 里打开一次 https://gemini.google.com 并登录。
+2. 设置里保持「Web mode」，勾选「I understand that web mode sends…」，Save。
+3. 之后每次比较：右上角出现一张小卡片「Gemini web is checking the answers」，下面盖着真正的 Gemini 页面（不能放到屏幕外，
+   否则 Chrome 会降低后台跨域 iframe 的速度）。点卡片上的 Cancel 可中止。完成后 iframe 自动移除。
+4. 超时默认 300 秒，可在设置里改（60–900）。
+
+### 2b. API 模式（BYOK）
 
 1. 到 Google AI Studio 申请 API Key。**注意：** Search Grounding 在 Gemini 3.x Flash / Flash-Lite 的免费层（未绑定结算账号）上标为 "Not available"，
    所以这个 Key 所在的项目必须绑定结算账号。绑定后每月前 5000 次搜索免费，token 按付费层计价（2026-11 查阅官方价格页）。
-2. 多面板页底部 **Verify** 面板 → 右侧 ⚙ → 粘贴 Key。
+2. 设置里选「API mode」，粘贴 Key。
 3. 勾选数据发送确认：「验证会把 Prompt 和两个回答的文本发送到 Google Gemini API」。**不勾选就不会发送任何内容。**
 4. 「Gemini model ID」可改，默认 `gemini-3.5-flash-lite`（官方模型页上的稳定版，支持 Search Grounding）。
    模型 ID 只存在配置里，没有写死在代码中。
@@ -92,6 +119,24 @@ Key 的存放位置：扩展自身 origin 的 IndexedDB（`PanelizeVerifyDB`）�
 
 ## 5. 验证流水线
 
+### 网页模式
+
+一次比较 = 在 gemini.google.com 上发**一条**消息（`modules/verify/web-judge.js` 组装，`multi-panel/verify-web-runner.js` 发送和读取）：
+
+1. 隐藏面板加载 `https://gemini.google.com/app`，等 Panelize 的 content script 就绪；
+   发 `ENABLE_TEMP_CHAT`（Panelize 原有的临时对话机制），等页面确认。
+2. 用 Panelize 原有的 `INJECT_TEXT` 把消息填进输入框并发送。消息 = 说明（抽陈述 → 用 Google 搜索核查并列出用到的网址 → 盲比较）+ Prompt + 匿名 X/Y 回答，要求只回一个 JSON 代码块。
+3. 用和 A/B 面板同样的完成判定（新的用户轮、无停止按钮、文本稳定 4 秒）读取回答，同时读取 Gemini 页面在这条回答里渲染的所有链接（不含代码块）。
+4. 本地校验：
+   - JSON 结构、裁决枚举、1–5 分，和 API 模式共用校验函数；
+   - 来源网址先做安全检查（只允许 http/https），再与页面链接比对（会展开 `google.com/url?q=` 跳转、去掉 `utm_*`）。**只有比对上的才算「已确认」来源**，其余显示为 unconfirmed；
+   - 模型说 SUPPORTED / CONTRADICTED 但没有任何已确认来源 → 降级为 `INSUFFICIENT_EVIDENCE`；页面上一个链接都没读到 → 所有陈述都不算已核实，并给出警告。
+5. 20 秒内没出现新的用户轮会重发一次；再失败报「请确认已登录 gemini.google.com」。
+
+投票前隐藏、盲评（不含模型名、投票）、X/Y 随机，和 API 模式完全相同。
+
+### API 模式
+
 一次比较 = 3 次 `generateContent` 调用（`POST /v1beta/models/{model}:generateContent`）：
 
 1. **抽取陈述**（JSON 输出，不搜索）：从匿名的 Answer X / Y 中抽出可独立核查的陈述，合并语义等价项（标注出现在 X、Y 或两者），意见/建议标 `verifiable:false`。每个回答最多 N 条（默认 8）。
@@ -120,7 +165,7 @@ Key 的存放位置：扩展自身 origin 的 IndexedDB（`PanelizeVerifyDB`）�
 
 ```bash
 npm ci
-npm test                 # 全部单测（含原有 1285 个）
+npx vitest run           # 全部单测（含原有 1285 个）
 npm run test:verify      # 只跑 Verify 相关单测
 npm run typecheck        # tsc --checkJs 校验 Verify 模块
 npx playwright install chromium
@@ -138,6 +183,7 @@ npm run test:e2e:verify  # 真实 Chromium 加载扩展的端到端流程
 | Test 7 API 失败 | 无效 Key（且错误信息不含 Key）、429 重试后报额度、超时、断网、安全拦截、搜索无证据；失败时仍可投票、回答照常显示 |
 | Test 8 持久化 | 重建 dock 后恢复会话且仍隐藏结果；e2e 刷新页面后恢复已揭示会话 |
 | Test 9 隐私 | 只读最后一轮；未同意不发送；请求体内容由 Test 4 的断言覆盖。**真实网络抓包未做**，见下文 |
+| 网页模式 | `verify-web-mode.test.js`：消息不含模型名/投票、来源比对与降级、X/Y 映射、无 JSON 报错、隐藏面板的临时对话/重发/超时/取消、dock 不需要 Key 且投票前隐藏；`verify-flow.e2e` 第二个用例在真实 Chromium 中用仿真 gemini.google.com 跑完整流程，断言没有任何 API 请求 |
 | Test 10 构建 | 真实 Chromium 加载 MV3 扩展、页面无 JS 报错；仓库全部 e2e 通过。`npm run lint`（web-ext，面向 Firefox）在原版就有 8 个错误，本改动未新增错误，只多 1 个测试文件里 `eval` 的警告 |
 
 ---
@@ -156,6 +202,12 @@ npm run test:e2e:verify  # 真实 Chromium 加载扩展的端到端流程
 10. 模型身份屏蔽是基于名字列表的启发式，无法覆盖所有间接线索（例如写作风格）。
 11. 计费：一次比较 3 次模型调用；Gemini 3 及以上按模型实际执行的每次搜索计费（2026-11 查阅官方文档时：每月 5000 次免费，之后每 1000 次 $14），以官方最新价格为准。
 12. Test 9 的「网络请求检查」只在测试中通过拦截请求完成，没有在真实浏览器里用 DevTools 抓包核对。
+
+13. **网页模式没有在真实 gemini.google.com 上测过。** 用的是 Panelize 现有的 Gemini 输入框、发送按钮和临时对话按钮选择器，回答读取用 `model-response`；
+    Gemini 页面上引用链接的真实结构未知——如果读不到，所有陈述都会显示为「证据不足」（裁决照常给出），界面会提示。
+    消息较长（两份回答各最多 12000 字符），Gemini 网页输入框若有长度上限，可在设置里调小「Max characters per answer」。
+14. 网页模式下 Gemini 是否真的搜索由它自己决定，扩展无法强制；也拿不到搜索次数和 token 用量。
+15. 网页模式同一时间只跑一个核查；另一个比较需要等它结束。
 
 ### 尚未实现
 
