@@ -798,8 +798,37 @@
    * origin, never '*', so a third-party page framing the provider learns
    * nothing (conversation URL, status); nothing is posted without that origin.
    */
+  /**
+   * Only a provider page embedded directly in the multi-panel page may post.
+   * The provider's own nested frames (Gemini has several) have a parent on the
+   * provider's origin, where this target origin would not match and Chrome
+   * logs an error. (Same guard as upstream Panelize 2.3.x.)
+   */
+  function canPostToMultiPanelHost() {
+    if (EXTENSION_ORIGIN === null || !window.parent || window.parent === window) {
+      return false;
+    }
+    // Test windows may mock `window.parent` without updating `window.top`.
+    if (window.top && window.top !== window && window.parent !== window.top) {
+      return false;
+    }
+    const ancestors = window.location?.ancestorOrigins;
+    if (ancestors && typeof ancestors.length === 'number' && ancestors.length > 0) {
+      return ancestors.length === 1 && ancestors[0] === EXTENSION_ORIGIN;
+    }
+    try {
+      const parentOrigin = window.parent.location?.origin;
+      if (typeof parentOrigin === 'string' && parentOrigin !== EXTENSION_ORIGIN) {
+        return false;
+      }
+    } catch {
+      // Cross-origin parent: expected inside the extension page.
+    }
+    return true;
+  }
+
   function postToMultiPanelHost(message) {
-    if (EXTENSION_ORIGIN === null || window.parent === window) {
+    if (!canPostToMultiPanelHost()) {
       return;
     }
     window.parent.postMessage(message, EXTENSION_ORIGIN);
@@ -1586,14 +1615,18 @@
   }
 
   // Find and click send button
-  // Claude's composer can take a moment to accept injected text: its send
-  // button may still be disabled at the first try, or a click may land
-  // before the editor state updates, leaving the prompt in the composer.
-  // Retry until the composer empties (Claude clears it once it sends);
-  // press Enter as a last resort. A click is only repeated while the text
-  // is still sitting in the composer, so a prompt is never sent twice.
-  const CLAUDE_SUBMIT_RETRY_DELAYS_MS = [700, 1500, 2500, 4000];
-  const CLAUDE_SENT_CHECK_MS = 1500;
+  // Claude often shows the injected prompt but does not send it: the first
+  // click can land before its editor has taken the text in, and Panelize's
+  // generic fallback selector can match the composer's "+" button instead of
+  // Send. So for Claude: look for the real Send button only, alternate a
+  // user-like click with Enter in the editor (which Claude's editor submits
+  // on), and check after each try whether the composer has emptied. A try is
+  // only made while the prompt is still in the composer, so nothing is sent
+  // twice. If it still has not gone out, the multi-panel page is told so.
+  const CLAUDE_SUBMIT_STEPS = ['click', 'enter', 'click', 'enter', 'click'];
+  const CLAUDE_SENT_CHECK_MS = 1200;
+  const CLAUDE_SEND_LABEL = /^(send|send message|send prompt|发送|发送消息|傳送|送出|送信)$/i;
+  const CLAUDE_NOT_SEND_LABEL = /attach|upload|add|plus|tool|menu|model|research|search|style|voice|dictat|stop|附件|上传|添加|工具|模型|语音|停止/i;
 
   function composerStillHolds(input, text) {
     if (!input || !input.isConnected) {
@@ -1604,28 +1637,107 @@
     return current.length > 0 && (!probe || current.includes(probe));
   }
 
+  function isShown(element) {
+    return Boolean(element && element.isConnected &&
+      (typeof element.getClientRects !== 'function' || element.getClientRects().length > 0 || element.offsetParent !== null));
+  }
+
+  /** Claude's Send button, never another composer button. */
+  function findClaudeSendButton(input) {
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const labelled = buttons.find(button => {
+      const label = (button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
+      return CLAUDE_SEND_LABEL.test(label) && isShown(button) && isElementEnabled(button);
+    });
+    if (labelled) {
+      return labelled;
+    }
+    // Unlabelled: the last enabled icon button in the composer, unless it is
+    // labelled as something else.
+    const box = input?.closest?.('fieldset, form') || null;
+    if (!box) {
+      return null;
+    }
+    const candidates = Array.from(box.querySelectorAll('button')).filter(button =>
+      button.querySelector('svg') && isShown(button) && isElementEnabled(button) &&
+      !CLAUDE_NOT_SEND_LABEL.test(`${button.getAttribute('aria-label') || ''} ${button.getAttribute('title') || ''} ${button.getAttribute('data-testid') || ''}`)
+    );
+    return candidates.length ? candidates[candidates.length - 1] : null;
+  }
+
+  function clickLikeUser(element) {
+    const base = { bubbles: true, cancelable: true, view: window, button: 0 };
+    try {
+      element.dispatchEvent(new PointerEvent('pointerdown', { ...base, buttons: 1, pointerType: 'mouse', isPrimary: true }));
+    } catch (e) {
+      // PointerEvent may be missing in old engines.
+    }
+    element.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 }));
+    try {
+      element.dispatchEvent(new PointerEvent('pointerup', { ...base, buttons: 0, pointerType: 'mouse', isPrimary: true }));
+    } catch (e) {
+      // see above
+    }
+    element.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
+    element.click();
+  }
+
   function pressEnterToSend(input) {
-    const options = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+    const options = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed: true };
     input.focus?.();
     input.dispatchEvent(new KeyboardEvent('keydown', options));
+    input.dispatchEvent(new KeyboardEvent('keypress', options));
     input.dispatchEvent(new KeyboardEvent('keyup', options));
   }
 
+  function describeClaudeComposer(input) {
+    const box = input?.closest?.('fieldset, form');
+    const buttons = Array.from((box || document).querySelectorAll('button')).slice(-8);
+    return {
+      composerFound: Boolean(input),
+      buttons: buttons.map(button => ({
+        label: (button.getAttribute('aria-label') || button.getAttribute('title') || '').slice(0, 40),
+        testId: (button.getAttribute('data-testid') || '').slice(0, 40),
+        disabled: !isElementEnabled(button)
+      }))
+    };
+  }
+
   function scheduleClaudeSubmit(input, text, providerMode, firstDelayMs) {
-    let attempt = 0;
+    let step = 0;
     const tryNow = () => {
-      if (!composerStillHolds(input, text)) {
-        return; // already sent
+      // Claude may re-render its editor: look it up again each time.
+      const current = findProviderInput('claude') || input;
+      if (!composerStillHolds(current, text)) {
+        return; // sent
       }
-      if (attempt >= CLAUDE_SUBMIT_RETRY_DELAYS_MS.length) {
-        console.warn('[Text Injection] Claude send button did not submit; pressing Enter');
-        pressEnterToSend(input);
+      if (step >= CLAUDE_SUBMIT_STEPS.length) {
+        const details = describeClaudeComposer(current);
+        console.warn('[Text Injection] Claude did not send the prompt', details);
+        postToMultiPanelHost({
+          type: 'PANELIZE_SEND_STUCK',
+          context: MULTI_PANEL_PROVIDER_STATUS_CONTEXT,
+          provider: 'claude',
+          details
+        });
         return;
       }
-      const clicked = clickSendButton('claude', providerMode);
-      attempt += 1;
-      const next = clicked ? CLAUDE_SENT_CHECK_MS : CLAUDE_SUBMIT_RETRY_DELAYS_MS[attempt - 1];
-      setTimeout(tryNow, next);
+      const action = CLAUDE_SUBMIT_STEPS[step];
+      step += 1;
+      if (action === 'click') {
+        const button = findClaudeSendButton(current);
+        if (button) {
+          console.log('[Text Injection] Claude: clicking Send', button.getAttribute('aria-label') || '');
+          clickLikeUser(button);
+        } else {
+          console.log('[Text Injection] Claude: Send button not found or disabled; pressing Enter');
+          pressEnterToSend(current);
+        }
+      } else {
+        console.log('[Text Injection] Claude: pressing Enter in the composer');
+        pressEnterToSend(current);
+      }
+      setTimeout(tryNow, CLAUDE_SENT_CHECK_MS);
     };
     setTimeout(tryNow, firstDelayMs);
   }

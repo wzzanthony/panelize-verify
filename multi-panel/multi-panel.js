@@ -257,6 +257,7 @@ const PANELIZE_PROVIDER_BUSY = 'PANELIZE_PROVIDER_BUSY';
 const PANELIZE_PROVIDER_IDLE = 'PANELIZE_PROVIDER_IDLE';
 const PANELIZE_PROVIDER_USER_INTERACTION = 'PANELIZE_PROVIDER_USER_INTERACTION';
 const PANELIZE_TEMP_CHAT_ENABLED = 'PANELIZE_TEMP_CHAT_ENABLED';
+const PANELIZE_SEND_STUCK = 'PANELIZE_SEND_STUCK';
 const PANELIZE_TEMP_CHAT_DISABLED = 'PANELIZE_TEMP_CHAT_DISABLED';
 const PANELIZE_PROVIDER_LOCATION = 'PANELIZE_PROVIDER_LOCATION';
 const PANELIZE_PAGE_WIDTH = 'PANELIZE_PAGE_WIDTH';
@@ -1203,8 +1204,9 @@ function handleProviderStatusMessage(event) {
     data.type === PANELIZE_TEMP_CHAT_ENABLED || data.type === PANELIZE_TEMP_CHAT_DISABLED;
   const isLocationMessage = data.type === PANELIZE_PROVIDER_LOCATION;
   const isPageWidthMessage = data.type === PANELIZE_PAGE_WIDTH;
+  const isSendStuckMessage = data.type === PANELIZE_SEND_STUCK;
   if (data.context !== MULTI_PANEL_PROVIDER_STATUS_CONTEXT
-    || (!data.requestId && !isTempChatMessage && !isLocationMessage && !isPageWidthMessage)) {
+    || (!data.requestId && !isTempChatMessage && !isLocationMessage && !isPageWidthMessage && !isSendStuckMessage)) {
     return;
   }
 
@@ -1214,6 +1216,11 @@ function handleProviderStatusMessage(event) {
   }
 
   switch (data.type) {
+    case PANELIZE_SEND_STUCK:
+      // Panelize Verify: the provider kept the prompt in its composer.
+      console.warn('[Panelize Verify] Prompt not sent in', panel.providerId, data.details);
+      showToast(`${panel.providerId === 'claude' ? 'Claude' : panel.providerId} did not send the prompt automatically. Press Send in that panel.`);
+      break;
     case PANELIZE_PROVIDER_LOCATION:
       if (!isProviderAllowedUrl(panel.providerId, data.url)) {
         return;

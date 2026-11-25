@@ -461,7 +461,10 @@ describe('characterization: multi-panel provider predicates, special cases, and 
         document.getElementById('send-all-btn').click();
         for (const [providerId, handle] of Object.entries(handleByProvider)) {
           const calls = handle.calls();
-          expect(calls.map(([, origin]) => origin)).toEqual(getProviderFrameOrigins(providerId));
+          // Panelize Verify: in web mode (the default) a Gemini panel is the
+          // verifier when two other panels are open, so Send All skips it.
+          const expectedOrigins = providerId === 'gemini' ? [] : getProviderFrameOrigins(providerId);
+          expect(calls.map(([, origin]) => origin)).toEqual(expectedOrigins);
           for (const [payload] of calls) {
             expect(payload).toEqual({
               type: 'TRIGGER_SEND',

@@ -45,7 +45,7 @@ Gemini 有两种工作方式，在设置里切换：
    点 **加载已解压的扩展程序（Load unpacked）**，选第 2 步那个文件夹。卡片上出现 "Panelize Verify" 且没有红色"错误"按钮，就装好了。
 4. **打开使用**：点浏览器工具栏的扩展图标（或按 `Ctrl+Shift+E`）打开多面板页，在前两个面板里登录要比较的 AI 网站。
 5. **配置 Gemini**：
-   - 网页模式（默认）：先在这个浏览器里登录 gemini.google.com；再到底部 **Verify** 面板 → ⚙，勾选网页模式的数据发送确认，保存。
+   - 网页模式（默认）：在这个浏览器里登录 gemini.google.com 即可。只要开着另外两个面板，网格里的 Gemini 面板就不再收 Send All，只负责验证。第一次验证时，Verify 面板会请你确认一次数据发送：点 "同意并开始验证"。
    - API 模式：⚙ 里选 "API mode"，填入 Gemini API Key，勾选确认，点 "Test key & model"。
 
 ### 不要用"打包扩展程序（Pack extension）"
@@ -61,11 +61,23 @@ Gemini 有两种工作方式，在设置里切换：
 | 拖入 `.crx` 后被拦截 | 见上一节，改用"加载已解压的扩展程序" |
 | 扩展装上后过一阵消失或报错 | 解压出的文件夹被删除或移动了。Chrome 每次都从这个文件夹读取代码，请把它放在固定位置 |
 
-### 更新到新版本
+### 更新到新版本（不用删除重装）
 
-下载新的 zip，解压后**覆盖原来的文件夹（保持同一路径）**，然后在 `chrome://extensions` 里点这个扩展卡片上的刷新按钮 ⟳。
+**推荐：用 git 克隆一次，以后每次只需拉取并刷新。**
 
-不要先"移除"再从另一个路径加载：未打包扩展的 ID 由文件夹路径决定，换路径或移除后，本地保存的比较历史和 API Key 都会丢失。
+1. 只需做一次：把仓库克隆到一个固定位置，在 `chrome://extensions` 里用「加载已解压的扩展程序」选中这个文件夹。
+   仓库是私有的，需要先登录 GitHub：
+   - 命令行：`gh auth login`，然后 `gh repo clone wzzanthony/panelize-verify ~/panelize-verify`；
+   - 或者用 GitHub Desktop：File → Clone repository。
+2. 以后每次更新：
+   - 命令行：`cd ~/panelize-verify && git pull`；GitHub Desktop 里点 **Fetch origin**，再点 **Pull origin**。
+   - 刷新扩展，两种方式任选：`chrome://extensions` 里点扩展卡片上的刷新按钮 ⟳；或者在多面板页 Verify → ⚙ → "Testing an update" 里点 **Reload extension from disk**。
+   - 重新打开多面板页。之前已经打开的 ChatGPT / Claude / Gemini 标签页也要刷新一次，新的内容脚本才会注入。
+3. 确认装的是新版：Verify 标题旁边会显示版本号，例如 `v2.2.4-verify.3`。
+
+**如果继续用 zip**：下载后解压，**覆盖原来的文件夹（保持同一路径）**，然后点刷新按钮 ⟳ 即可。
+
+不要先"移除"扩展再重新加载：未打包扩展的 ID 由文件夹路径决定，移除或换路径后，本地保存的比较历史、设置和 API Key 都会丢失。
 
 ## 关于费用
 

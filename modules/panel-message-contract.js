@@ -255,6 +255,15 @@ export const FRAME_TO_HOST_MESSAGES = Object.freeze([
     receiverFiles: ['multi-panel/multi-panel.js']
   }),
   freezeContractEntry({
+    // Panelize Verify: a provider kept the prompt in its composer after Send All.
+    type: 'PANELIZE_SEND_STUCK',
+    action: null,
+    direction: 'frame-to-host',
+    payloadFields: ['type', 'context', 'provider', 'details'],
+    senderFiles: ['content-scripts/text-injection-all-providers.js'],
+    receiverFiles: ['multi-panel/multi-panel.js']
+  }),
+  freezeContractEntry({
     type: 'PANELIZE_TEMP_CHAT_DISABLED',
     action: null,
     direction: 'frame-to-host',

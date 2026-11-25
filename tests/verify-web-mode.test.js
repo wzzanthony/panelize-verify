@@ -297,8 +297,19 @@ describe('Verify web mode — dock', () => {
     await env.dock.captureNow();
     await flush();
     expect(env.webEvaluate).not.toHaveBeenCalled();
-    expect(env.root.textContent).toContain('Confirm this once in Verify settings');
-    document.querySelector('.pv-modal')?.remove();
+    expect(document.querySelector('.pv-modal')).toBeNull();
+    const allow = [...env.root.querySelectorAll('button')].find(button => button.textContent.includes('Allow and verify'));
+    expect(allow).toBeTruthy();
+    allow.click();
+    await flush();
+    expect(env.webEvaluate).toHaveBeenCalledTimes(1);
+    expect(env.dock._getCurrentSession().verification.status).toBe('done');
+  });
+
+  it('treats a Gemini grid panel as the verifier before any consent is given', async () => {
+    const env = setupDock({ autoVerify: false }, { withGeminiPanel: true });
+    await env.dock.init();
+    expect(env.dock.isVerifierPanel(env.panels[0])).toBe(true);
   });
 
   it('verifies without an API key and still hides results until the vote', async () => {

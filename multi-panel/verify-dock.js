@@ -262,12 +262,13 @@ export function createVerifyDock(options) {
   }
 
   /**
-   * Once web mode is set up (its consent given), Gemini is the verifier: a
-   * Gemini panel in the grid neither receives Send All nor counts as answer
-   * A or B. Before that, Panelize's panels behave as they always have.
+   * In web mode Gemini is the verifier: when two other panels are open to be
+   * compared, a Gemini panel in the grid neither receives Send All nor counts
+   * as answer A or B. With fewer, Gemini stays an ordinary answer panel.
    */
   function isVerifierPanel(panel) {
-    return isWebBackend() && Boolean(settings?.webConsentAcknowledged) && panel?.providerId === 'gemini';
+    if (!isWebBackend() || panel?.providerId !== 'gemini') return false;
+    return getPanels().filter(other => other?.providerId !== 'gemini').length >= 2;
   }
 
   function answerPanels() {
@@ -296,6 +297,9 @@ export function createVerifyDock(options) {
     const pair = comparedPanels();
     if (!pair || !text?.trim()) return;
     stopPolling();
+    // Show the Verify area (and in web mode the Gemini verifier below) as
+    // soon as a comparison starts.
+    if (!expanded) setExpanded(true);
     capture = {
       prompt: text,
       startedAt: now(),
@@ -463,8 +467,27 @@ export function createVerifyDock(options) {
 
   function ensureConsent() {
     if (hasConsent()) return true;
+    // Web mode asks inline, in the Gemini section (see renderGeminiSection).
+    if (isWebBackend()) {
+      setExpanded(true);
+      render();
+      return false;
+    }
     openSettings({ highlightConsent: true });
     return false;
+  }
+
+  /** The one-time web-mode consent, given from the inline prompt; then verify. */
+  async function grantWebConsent(sessionId) {
+    try {
+      settings = await saveVerifySettings({ ...settings, backend: 'web', webConsentAcknowledged: true }, settingsStorage);
+    } catch (error) {
+      errorMessage = `Could not save the setting: ${error.message}`;
+      render();
+      return;
+    }
+    render();
+    if (sessionId) void startVerification(sessionId);
   }
 
   // ===== Gemini verifier panel (web mode) =====
@@ -649,6 +672,17 @@ export function createVerifyDock(options) {
     return { name, phase };
   }
 
+  /** The installed build, e.g. "v2.2.4-verify.3", so a tester sees which code runs. */
+  function buildLabel() {
+    try {
+      const manifest = globalThis.chrome?.runtime?.getManifest?.();
+      const version = manifest?.version_name || manifest?.version;
+      return version ? `v${version}` : '';
+    } catch {
+      return '';
+    }
+  }
+
   function renderHeader() {
     const chips = ['A', 'B'].map(label => {
       const { name, phase } = sideStatus(label);
@@ -661,6 +695,7 @@ export function createVerifyDock(options) {
         class: 'pv-title-btn', type: 'button', 'aria-expanded': String(expanded),
         onclick: () => setExpanded(!expanded)
       }, [icon(expanded ? 'expand_more' : 'expand_less'), el('span', { text: 'Verify' })]),
+      buildLabel() ? el('span', { class: 'pv-muted pv-build', title: 'Installed Panelize Verify build', text: buildLabel() }) : null,
       el('div', { class: 'pv-chips' }, chips),
       el('div', { class: 'pv-header-actions' }, [
         el('button', { class: 'pv-btn', type: 'button', title: 'Read both panels now', onclick: () => void captureNow() },
@@ -769,6 +804,15 @@ export function createVerifyDock(options) {
     }
     const status = session.verification?.status || 'idle';
     const running = runners.has(session.id) || status === 'running';
+    if (isWebBackend() && !hasConsent()) {
+      section.append(
+        el('p', { class: 'pv-note pv-consent', text: 'Gemini 网页验证会把问题和两个匿名回答（X / Y）发送到你登录的 gemini.google.com，由 Gemini 按验收模板核查。你的投票不会发送。只需确认一次。' }),
+        el('button', {
+          type: 'button', class: 'pv-btn pv-primary',
+          onclick: () => void grantWebConsent(running ? null : session.id)
+        }, '同意并开始验证 / Allow and verify'));
+      return section;
+    }
     if (!backendReady()) {
       const text = isWebBackend()
         ? 'Web mode sends the prompt and both answers to Gemini (gemini.google.com) with your Google login. Confirm this once in Verify settings.'
@@ -1165,7 +1209,15 @@ export function createVerifyDock(options) {
       el('div', { class: 'pv-row' }, [
         el('button', { type: 'button', class: 'pv-btn pv-primary', onclick: () => void save() }, 'Save')
       ]),
-      status
+      status,
+      el('details', { class: 'pv-dev' }, [
+        el('summary', { text: `Testing an update (${buildLabel() || 'unknown build'})` }),
+        el('p', { class: 'pv-muted', text: 'After replacing the extension\'s files (git pull, or a new zip unpacked over the same folder), reload it here. This page closes; open it again from the toolbar. Saved comparisons and settings are kept.' }),
+        el('button', {
+          type: 'button', class: 'pv-btn',
+          onclick: () => globalThis.chrome?.runtime?.reload?.()
+        }, 'Reload extension from disk')
+      ])
     ]));
   }
 
