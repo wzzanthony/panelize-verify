@@ -37,6 +37,84 @@ describe('answer extractor (Test 2: answer extraction)', () => {
     expect(state.generating).toBe(false);
   });
 
+  describe('ChatGPT 2026 markup without data-message-author-role', () => {
+    it('reads search-unit-key turns and skips the "ChatGPT said:" heading', () => {
+      document.body.innerHTML = `
+        <main>
+          <div data-turn-key="t1">
+            <div data-chatgpt-search-unit-key="c:0:user"><h5 class="sr-only">You said:</h5>
+              <div data-user-message-bubble="true">old question</div></div>
+            <div data-chatgpt-search-unit-key="c:1:assistant"><div data-markdown-text-style="assistant-message"><p>OLD ANSWER</p></div></div>
+          </div>
+          <div data-turn-key="t2">
+            <div data-chatgpt-search-unit-key="c:2:user"><h5 class="sr-only">You said:</h5>
+              <div data-user-message-bubble="true">Why is my calf tight?</div></div>
+            <div data-chatgpt-search-unit-key="c:3:assistant">
+              <h6 class="sr-only">ChatGPT said:</h6>
+              <div data-markdown-text-style="assistant-message"><p>Usually <strong>fatigue</strong>.</p></div>
+            </div>
+          </div>
+        </main>`;
+      const state = extractor.readAnswerState('chatgpt');
+      expect(state.userTurnCount).toBe(2);
+      expect(state.lastUserText).toBe('Why is my calf tight?');
+      expect(state.text).toBe('Usually **fatigue**.');
+      expect(state.generating).toBe(false);
+      expect(state.probe).toBeUndefined();
+    });
+
+    it('reads content-search-unit-key turns', () => {
+      document.body.innerHTML = `
+        <div data-content-search-unit-key="x:0:user"><div data-user-message-bubble="true">Q1</div></div>
+        <div data-content-search-unit-key="x:1:assistant"><div class="prose"><p>A1</p></div></div>`;
+      const state = extractor.readAnswerState('chatgpt');
+      expect(state.userTurnCount).toBe(1);
+      expect(state.lastUserText).toBe('Q1');
+      expect(state.text).toBe('A1');
+    });
+
+    it('reads li[data-message-role] replies and treats an incomplete one as generating', () => {
+      document.body.innerHTML = `
+        <ol>
+          <li data-message-role="user">Q</li>
+          <li data-message-role="assistant"><div data-assistant-markdown-root><p>Partial</p></div></li>
+        </ol>`;
+      let state = extractor.readAnswerState('chatgpt');
+      expect(state.text).toBe('Partial');
+      expect(state.generating).toBe(true);
+      document.querySelector('li[data-message-role="assistant"]').setAttribute('data-message-complete', '');
+      state = extractor.readAnswerState('chatgpt');
+      expect(state.generating).toBe(false);
+    });
+
+    it('uses the parent of a role heading as the turn', () => {
+      document.body.innerHTML = `
+        <section><h4 data-conversation-role="user">You said:</h4><p>Q</p></section>
+        <section><h4 data-conversation-role="assistant">ChatGPT said:</h4><div><p>The answer.</p></div></section>`;
+      const state = extractor.readAnswerState('chatgpt');
+      expect(state.userTurnCount).toBe(1);
+      expect(state.text).toBe('The answer.');
+    });
+
+    it('treats a non-complete turn state as generating', () => {
+      document.body.innerHTML = `
+        <div data-talvt-turn-state="streaming">
+          <div data-content-search-unit-key="x:1:assistant"><p>so far</p></div>
+        </div>`;
+      expect(extractor.readAnswerState('chatgpt').generating).toBe(true);
+      document.querySelector('[data-talvt-turn-state]').setAttribute('data-talvt-turn-state', 'complete');
+      expect(extractor.readAnswerState('chatgpt').generating).toBe(false);
+    });
+
+    it('reports marker counts, not text, when nothing is found', () => {
+      document.body.innerHTML = '<main><div data-turn-key="t"><p>secret page text</p></div></main>';
+      const state = extractor.readAnswerState('chatgpt');
+      expect(state.hasAnswer).toBe(false);
+      expect(state.probe).toMatchObject({ role: 0, unit: 0, turnKey: 1 });
+      expect(JSON.stringify(state.probe)).not.toContain('secret');
+    });
+  });
+
   it('reports no answer while the new turn has no reply yet', () => {
     document.body.innerHTML = `
       <div data-message-author-role="user">q1</div>

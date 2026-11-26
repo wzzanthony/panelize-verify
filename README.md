@@ -79,7 +79,7 @@ Gemini 有两种工作方式，在设置里切换：
    - 命令行：`cd ~/panelize-verify && git pull`；GitHub Desktop 里点 **Fetch origin**，再点 **Pull origin**。
    - 刷新扩展，两种方式任选：`chrome://extensions` 里点扩展卡片上的刷新按钮 ⟳；或者在多面板页 Verify → ⚙ → "Testing an update" 里点 **Reload extension from disk**。
    - 重新打开多面板页。之前已经打开的 ChatGPT / Claude / Gemini 标签页也要刷新一次，新的内容脚本才会注入。
-3. 确认装的是新版：Verify 标题旁边会显示版本号，例如 `v2.2.4-verify.3`。
+3. 确认装的是新版：Verify 标题旁边会显示版本号，例如 `Build 5`。
 
 **如果继续用 zip**：下载后解压，**覆盖原来的文件夹（保持同一路径）**，然后点刷新按钮 ⟳ 即可。
 

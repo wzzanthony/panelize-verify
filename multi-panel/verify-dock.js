@@ -423,7 +423,14 @@ export function createVerifyDock(options) {
     const reply = state.hasAnswer ? `回答 ${String(state.text || '').length} 字` : '未找到回答';
     const busy = state.generating ? '页面显示仍在生成' : '页面显示已停止';
     const user = state.lastUserText ? '' : ' · 未找到提问';
-    return `${turns} · ${reply} · ${busy}${user}`;
+    const probe = state.probe && typeof state.probe === 'object'
+      ? ` · 页面标记 ${Object.entries(state.probe)
+        .filter(([name, count]) => /^[a-zA-Z]{1,12}$/.test(name) && Number.isInteger(count))
+        .slice(0, 10)
+        .map(([name, count]) => `${name}=${count}`)
+        .join(' ')}`
+      : '';
+    return `${turns} · ${reply} · ${busy}${user}${probe}`;
   }
 
   async function completeCapture(prompt, sideA, sideB, source) {

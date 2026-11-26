@@ -29,12 +29,65 @@
    * first, because provider DOMs change without notice.
    */
   const ADAPTERS = {
+    // ChatGPT dropped data-message-author-role in its Sept–Oct 2026 redesign
+    // and different accounts see different markup, so every known variant is
+    // tried in order. A heading that only names the role ("ChatGPT said:")
+    // stands for its parent turn (see turnElement).
     chatgpt: {
-      userTurns: ['[data-message-author-role="user"]'],
-      assistantTurns: ['[data-message-author-role="assistant"]'],
-      content: ['.markdown', '[class*="markdown"]'],
-      generating: ['button[data-testid="stop-button"]', '[data-testid="stop-button"]', '.result-streaming'],
-      exclude: []
+      userTurns: [
+        '[data-message-author-role="user"]',
+        '[data-chatgpt-search-unit-key$=":user"]',
+        '[data-content-search-unit-key$=":user"]',
+        '[data-message-role="user"]',
+        '[data-turn="user"]',
+        '[data-conversation-role="user"]',
+        '[data-user-message-bubble]'
+      ],
+      assistantTurns: [
+        '[data-message-author-role="assistant"]',
+        '[data-chatgpt-search-unit-key$=":assistant"]',
+        '[data-content-search-unit-key$=":assistant"]',
+        '[data-message-role="assistant"]',
+        '[data-turn="assistant"]',
+        '[data-conversation-role="assistant"]',
+        // Last resort: the rendered reply itself.
+        '[data-assistant-markdown-root]',
+        '[data-markdown-text-style="assistant-message"]',
+        '.markdown'
+      ],
+      userContent: ['[data-user-message-bubble="true"]', '[data-user-message-bubble]'],
+      content: [
+        '[data-assistant-markdown-root]',
+        '[data-markdown-text-style="assistant-message"]',
+        '[data-markdown-text-style]',
+        '.markdown',
+        '[class*="markdown"]',
+        '[class*="prose"]'
+      ],
+      generating: [
+        'button[data-testid="stop-button"]',
+        '[data-testid="stop-button"]',
+        'button[aria-label="Stop generating"]',
+        'button[aria-label="Stop streaming"]',
+        '#composer-submit-button[aria-label^="Stop"]',
+        '[data-talvt-turn-state]:not([data-talvt-turn-state="complete"]):not([data-talvt-turn-state=""])',
+        'li[data-message-role="assistant"]:not([data-message-complete])',
+        '[data-assistant-markdown-root] [aria-busy="true"]',
+        '.result-streaming'
+      ],
+      exclude: ['.sr-only', 'h1[data-conversation-role]', 'h2[data-conversation-role]',
+        'h3[data-conversation-role]', 'h4[data-conversation-role]', 'h5[data-conversation-role]',
+        'h6[data-conversation-role]'],
+      // Counted (never read) when nothing is found, to show which markup the page uses.
+      probe: {
+        role: '[data-message-author-role]',
+        unit: '[data-chatgpt-search-unit-key], [data-content-search-unit-key]',
+        msgRole: '[data-message-role]',
+        convRole: '[data-conversation-role]',
+        turnKey: '[data-turn-key], [data-turn]',
+        md: '[data-assistant-markdown-root], [data-markdown-text-style], .markdown',
+        prose: '[class*="prose"]'
+      }
     },
     claude: {
       userTurns: ['[data-testid="user-message"]'],
@@ -101,6 +154,26 @@
       }
     }
     return null;
+  }
+
+  /** A heading that only labels a turn's role stands for the turn around it. */
+  function turnElement(element) {
+    return /^H[1-6]$/i.test(element.tagName) && element.parentElement
+      ? element.parentElement
+      : element;
+  }
+
+  /** How many elements match each marker selector; no page text is read. */
+  function countMarkers(root, markers) {
+    const counts = {};
+    for (const [name, selector] of Object.entries(markers)) {
+      try {
+        counts[name] = root.querySelectorAll(selector).length;
+      } catch {
+        counts[name] = -1;
+      }
+    }
+    return counts;
   }
 
   /** Drops elements nested inside another element of the same list. */
@@ -295,9 +368,9 @@
     if (!adapter) {
       return { supported: false };
     }
-    const userTurns = outermostOnly(queryAllFirstMatch(root, adapter.userTurns));
+    const userTurns = outermostOnly(queryAllFirstMatch(root, adapter.userTurns).map(turnElement));
     const lastUser = userTurns[userTurns.length - 1] || null;
-    const assistantTurns = outermostOnly(queryAllFirstMatch(root, adapter.assistantTurns))
+    const assistantTurns = outermostOnly(queryAllFirstMatch(root, adapter.assistantTurns).map(turnElement))
       .filter(element => isAfter(element, lastUser));
 
     const texts = assistantTurns.map(turn => {
@@ -308,13 +381,20 @@
     if (text.length > MAX_ANSWER_CHARS) {
       text = text.slice(0, MAX_ANSWER_CHARS);
     }
-    const lastUserText = lastUser
-      ? lastUser.textContent.replace(/\s+/g, ' ').trim().slice(0, MAX_USER_TEXT_CHARS)
+    const userNode = lastUser
+      ? (adapter.userContent && queryFirst(lastUser, adapter.userContent)) || lastUser
+      : null;
+    const lastUserText = userNode
+      ? userNode.textContent.replace(/\s+/g, ' ').trim().slice(0, MAX_USER_TEXT_CHARS)
       : '';
     const generating = Boolean(queryFirst(root, adapter.generating));
     const links = collectLinks(assistantTurns);
+    const probe = (!text || userTurns.length === 0) && adapter.probe
+      ? countMarkers(root, adapter.probe)
+      : undefined;
 
     return {
+      probe,
       supported: true,
       generating,
       userTurnCount: userTurns.length,
